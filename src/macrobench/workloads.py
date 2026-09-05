@@ -1,25 +1,156 @@
+import random
+import time
+import uuid
+from dataclasses import asdict
+from datetime import UTC, datetime
+from functools import partial
+from pathlib import Path
+
+import polars as pl
 import typer
 
 from src.branch.cli import Backend
-from src.macrobench.bauplan import FIXTURE_TABLES, connect, create_root_branch, materialize_fixture
+from src.common.results import append_results
+from src.macrobench import bauplan as bauplan_backend
+from src.macrobench.actions import TARGETS, choose_action
+from src.macrobench.experiment import MacrobenchConfig, timed
 
-# The namespace the fixture is built in, and that the workload's own models will be written to
-NAMESPACE = "tpch_1"
 
+def run_data_engineering(
+    backend: Backend,
+    base_branch: str,
+    config: MacrobenchConfig,
+    results_path: str | Path = "results/macrobench.parquet",
+) -> pl.DataFrame:
+    """Data engineering workload: branch, rewrite a model, evaluate against gold, keep or prune.
 
-def run_data_engineering(backend: Backend, base_branch: str) -> None:
-    """Data engineering workload: branch, rewrite a model in the DAG, compare against gold, merge."""
+    The agent walks up a DAG of five models, and each step is one attempt at one of them. A step
+    that improves the set of models matching gold becomes the new head, so the successful attempts
+    form a single deep chain; a step that does not is deleted, and the next attempt starts from the
+    last good state. The run ends when every model matches or the agent runs out of steps.
+    """
     if backend is not Backend.bauplan:
         raise NotImplementedError(f"the data engineering workload is not implemented for {backend} yet")
 
-    client = connect()
-    root_branch = create_root_branch(client, base_branch)
-    materialize_fixture(client, root_branch, NAMESPACE)
-    typer.echo(f"root branch {root_branch} ready with {len(FIXTURE_TABLES)} fixture tables")
+    exp_id = str(uuid.uuid4())
+    rng = random.Random(config.seed)
+    rows: list[dict] = []
 
+    # ---- setup, untimed ----
+    client = bauplan_backend.connect()
+    root_branch = bauplan_backend.create_root_branch(client, base_branch)
+    bauplan_backend.materialize_fixture(client, root_branch, config.namespace)
+    typer.echo(f"root branch {root_branch} ready with {len(bauplan_backend.FIXTURE_TABLES)} fixture tables")
+
+    head, matching, built = root_branch, frozenset(), frozenset()
+    live_branches = [root_branch]
+
+    # ---- timed loop ----
+    workload_started_at = datetime.now(tz=UTC)
+    workload_perf_start = time.perf_counter()
     try:
-        raise NotImplementedError("the timed steps on top of the root branch are not implemented yet")
+        for step in range(config.max_steps):
+            action = choose_action(rng, matching, built, config.p_correct)
+            if action is None:
+                break
+
+            # Branch name is built outside the measured region, the way part 1 does it
+            step_branch = f"{root_branch}_s{step}"
+            row, branch = timed(
+                "create_branch",
+                step,
+                action.target,
+                step_branch,
+                partial(bauplan_backend.create_branch, client, step_branch, head),
+            )
+            rows.append(row)
+            live_branches.append(branch)
+
+            row, _ = timed(
+                "materialize",
+                step,
+                action.target,
+                branch,
+                partial(bauplan_backend.materialize, client, branch, config.namespace, action),
+            )
+            rows.append(row)
+
+            candidate_built = built | {action.target}
+            row, new_matching = timed(
+                "evaluate",
+                step,
+                action.target,
+                branch,
+                partial(bauplan_backend.evaluate, client, branch, config.namespace, candidate_built),
+            )
+            rows.append(row)
+
+            if len(new_matching) > len(matching):
+                head, matching, built = branch, new_matching, candidate_built
+            else:
+                row, _ = timed(
+                    "delete_branch",
+                    step,
+                    action.target,
+                    branch,
+                    partial(bauplan_backend.delete_branch, client, branch),
+                )
+                rows.append(row)
+                live_branches.remove(branch)
+
+            typer.echo(
+                f"step {step}: {action.target} ({action.variant}) -> "
+                f"{len(matching)}/{len(TARGETS)} matching, head {head}"
+            )
+
+            if len(matching) == len(TARGETS):
+                break
+
+        # Publishing the finished chain is part of the workload, so it is timed like the rest
+        if head != root_branch:
+            row, _ = timed(
+                "merge_branch",
+                config.max_steps,
+                "",
+                head,
+                partial(bauplan_backend.merge_branch, client, head, root_branch),
+            )
+            rows.append(row)
+
+        workload_duration_s = time.perf_counter() - workload_perf_start
+        workload_ended_at = datetime.now(tz=UTC)
+        # The whole timed region as one row, so a run's end-to-end cost is queryable without
+        # having to re-add the per-operation durations and the gaps between them
+        rows.append(
+            {
+                "step": -1,
+                "operation": "workload",
+                "target": "",
+                "branch_name": root_branch,
+                "duration_s": workload_duration_s,
+                "started_at": workload_started_at,
+                "ended_at": workload_ended_at,
+            }
+        )
     finally:
-        # Nothing branches off the root yet, so do not leave it behind
-        client.delete_branch(root_branch)
-        typer.echo(f"deleted {root_branch}")
+        # ---- teardown, untimed ----
+        # Children before parents, so a branch is never deleted while another still points at it
+        for branch in reversed(live_branches):
+            bauplan_backend.delete_branch(client, branch)
+
+    config_struct = asdict(config)
+    df = pl.DataFrame(
+        [
+            {
+                "backend": str(backend),
+                "exp_id": exp_id,
+                **row,
+                "matched": len(matching),
+                "targets": len(TARGETS),
+                "config": config_struct,
+            }
+            for row in rows
+        ]
+    )
+
+    return append_results(df, results_path)

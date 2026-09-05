@@ -1,0 +1,7 @@
+project:
+  id: c299bec0-7a56-4cd3-a1eb-950c4cbbdcf6
+  name: macrobench_revenue_by_nation_quarter
+
+parameters:
+  variant:
+    default: correct

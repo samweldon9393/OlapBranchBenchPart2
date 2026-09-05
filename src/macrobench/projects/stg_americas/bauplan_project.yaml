@@ -1,0 +1,7 @@
+project:
+  id: 6c437325-264e-42b5-9ee0-506399cb3e45
+  name: macrobench_stg_americas
+
+parameters:
+  variant:
+    default: correct

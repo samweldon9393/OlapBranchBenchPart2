@@ -1,0 +1,7 @@
+project:
+  id: 62f41234-9ce2-43e4-8854-6103b11f4970
+  name: macrobench_stg_europe
+
+parameters:
+  variant:
+    default: correct
