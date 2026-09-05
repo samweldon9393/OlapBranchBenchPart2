@@ -17,6 +17,10 @@ dependencies = [
 
 [tool.ruff]
 line-length = 120
+# Bauplan projects are separate deployables whose models must be written the way the framework
+# parses them: bauplan.Model(...) in argument defaults (B008), and signatures plain enough for
+# ast.literal_eval, which rules out annotating them (ANN001/ANN201)
+extend-exclude = ["src/macrobench/projects"]
 
 [tool.ruff.lint]
 select = [
