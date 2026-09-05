@@ -1,7 +1,7 @@
 import typer
 
 from src.branch.cli import Backend
-from src.macrobench.bauplan import FIXTURE_TABLES, connect, create_root_branch
+from src.macrobench.bauplan import FIXTURE_TABLES, connect, create_root_branch, materialize_fixture
 
 # The namespace the fixture is built in, and that the workload's own models will be written to
 NAMESPACE = "tpch_1"
@@ -13,7 +13,8 @@ def run_data_engineering(backend: Backend, base_branch: str) -> None:
         raise NotImplementedError(f"the data engineering workload is not implemented for {backend} yet")
 
     client = connect()
-    root_branch = create_root_branch(client, base_branch, NAMESPACE)
+    root_branch = create_root_branch(client, base_branch)
+    materialize_fixture(client, root_branch, NAMESPACE)
     typer.echo(f"root branch {root_branch} ready with {len(FIXTURE_TABLES)} fixture tables")
 
     try:
