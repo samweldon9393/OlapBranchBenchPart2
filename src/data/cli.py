@@ -3,6 +3,7 @@ from typing import Annotated
 
 import typer
 
+from src.data.feeds import generate_feeds
 from src.data.tpch import generate_tpch_parquet
 
 app = typer.Typer(help="Dataset generation for OlapBranchBench")
@@ -17,3 +18,16 @@ def tpch(
     target = out_dir or Path(f"data/tpch_sf{scale_factor:g}")
     out = generate_tpch_parquet(scale_factor, target)
     typer.echo(f"wrote TPC-H sf={scale_factor:g} parquet to {out}")
+
+
+@app.command()
+def feeds(
+    scale_factor: Annotated[float, typer.Option("--sf", help="TPC-H scale factor")] = 1.0,
+    tpch_dir: Annotated[Path | None, typer.Option(help="TPC-H input dir (default data/tpch_sf<sf>)")] = None,
+    out_dir: Annotated[Path | None, typer.Option(help="Output dir (default data/feeds_sf<sf>)")] = None,
+) -> None:
+    """Split TPC-H into drifted regional feeds plus the gold tables the pipeline is checked against."""
+    source = tpch_dir or Path(f"data/tpch_sf{scale_factor:g}")
+    target = out_dir or Path(f"data/feeds_sf{scale_factor:g}")
+    out = generate_feeds(source, target)
+    typer.echo(f"wrote feeds and gold tables for sf={scale_factor:g} to {out}")
