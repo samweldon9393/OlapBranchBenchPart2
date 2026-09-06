@@ -12,18 +12,20 @@ The client is deliberately opaque: the workload only ever receives one and hands
 it actually is stays the backend's business.
 """
 
+from collections.abc import Mapping
 from typing import Protocol
 
 from src.branch.cli import Backend
 from src.macrobench import bauplan as bauplan_backend
-from src.macrobench.actions import Action
+from src.macrobench.spec import Action, Fixture
 
 
 class MacroBackend(Protocol):
-    """What a backend must expose to run an end-to-end workload against it."""
+    """What a backend must expose to run an end-to-end workload against it.
 
-    # The tables the fixture leaves on the root branch for the workload to build on and check against
-    FIXTURE_TABLES: tuple[str, ...]
+    Nothing here knows which workload is running: what to set up and what counts as correct arrive
+    as arguments, so the same eight operations serve all four.
+    """
 
     def connect(self) -> object:
         """Open a client."""
@@ -33,8 +35,8 @@ class MacroBackend(Protocol):
         """Create the root branch off the base ref and return its name."""
         ...
 
-    def materialize_fixture(self, client: object, branch: str, namespace: str) -> None:
-        """Put the feeds and the gold tables on the branch."""
+    def materialize_fixture(self, client: object, branch: str, namespace: str, fixture: Fixture) -> None:
+        """Build the workload's fixture on the branch, and check it left the tables it owes."""
         ...
 
     def create_branch(self, client: object, branch: str, from_ref: str) -> str:
@@ -53,8 +55,8 @@ class MacroBackend(Protocol):
         """Apply the action's rewrite on the branch, reporting whether it built."""
         ...
 
-    def evaluate(self, client: object, branch: str, namespace: str, built: frozenset[str]) -> frozenset[str]:
-        """Return the subset of the built models that reproduce their gold table exactly."""
+    def evaluate(self, client: object, branch: str, namespace: str, checks: Mapping[str, str]) -> frozenset[str]:
+        """Run each target's check SQL on the branch and return the targets whose `ok` came back true."""
         ...
 
 

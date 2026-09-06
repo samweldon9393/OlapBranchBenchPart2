@@ -11,34 +11,39 @@ import typer
 
 from src.branch.cli import Backend
 from src.common.results import append_results
-from src.macrobench.actions import TARGETS, choose_action
 from src.macrobench.backends import resolve
 from src.macrobench.experiment import MacrobenchConfig, timed
+from src.macrobench.spec import Workload, choose_action
 
 
-def run_data_engineering(
+def run_workload(
+    workload: Workload,
     backend: Backend,
     base_branch: str,
     config: MacrobenchConfig,
     results_path: str | Path = "results/macrobench.parquet",
 ) -> pl.DataFrame:
-    """Data engineering workload: branch, rewrite a model, evaluate against gold, keep or prune.
+    """Run one workload end to end: branch, mutate, evaluate, keep or prune.
 
-    The agent walks up a DAG of five models, and each step is one attempt at one of them. A step
-    that improves the set of models matching gold becomes the new head, so the successful attempts
-    form a single deep chain; a step that does not is deleted, and the next attempt starts from the
-    last good state. The run ends when every model matches or the agent runs out of steps.
+    The agent walks up the workload's DAG, and each step is one attempt at one target. A step that
+    improves the set of passing targets becomes the new head, so the successful attempts form a
+    single deep chain; a step that does not is deleted, and the next attempt starts from the last
+    good state. The run ends when every target passes or the agent runs out of steps.
+
+    Nothing below is specific to a workload: what to build and how it is judged all come off the
+    Workload, so the four of them share this loop.
     """
     ops = resolve(backend)
     exp_id = str(uuid.uuid4())
     rng = random.Random(config.seed)
     rows: list[dict] = []
+    targets = workload.targets
 
     # ---- setup, untimed ----
     client = ops.connect()
     root_branch = ops.create_root_branch(client, base_branch)
-    ops.materialize_fixture(client, root_branch, config.namespace)
-    typer.echo(f"root branch {root_branch} ready with {len(ops.FIXTURE_TABLES)} fixture tables")
+    ops.materialize_fixture(client, root_branch, config.namespace, workload.fixture)
+    typer.echo(f"root branch {root_branch} ready with {len(workload.fixture.tables)} fixture tables")
 
     head, matching, built = root_branch, frozenset(), frozenset()
     live_branches = [root_branch]
@@ -48,7 +53,7 @@ def run_data_engineering(
     workload_perf_start = time.perf_counter()
     try:
         for step in range(config.max_steps):
-            action = choose_action(rng, matching, built, config.p_correct)
+            action = choose_action(workload, rng, matching, built, config.p_correct)
             if action is None:
                 break
 
@@ -74,12 +79,14 @@ def run_data_engineering(
             rows.append(row)
 
             candidate_built = built | {action.target}
+            # Only what has been built can pass, so the check set follows the chain up the DAG
+            candidate_checks = {target: workload.checks[target] for target in candidate_built}
             row, new_matching = timed(
                 "evaluate",
                 step,
                 action.target,
                 branch,
-                partial(ops.evaluate, client, branch, config.namespace, candidate_built),
+                partial(ops.evaluate, client, branch, config.namespace, candidate_checks),
             )
             rows.append(row)
 
@@ -98,10 +105,10 @@ def run_data_engineering(
 
             typer.echo(
                 f"step {step}: {action.target} ({action.variant}) -> "
-                f"{len(matching)}/{len(TARGETS)} matching, head {head}"
+                f"{len(matching)}/{len(targets)} matching, head {head}"
             )
 
-            if len(matching) == len(TARGETS):
+            if len(matching) == len(targets):
                 break
 
         # Publishing the finished chain is part of the workload, so it is timed like the rest
@@ -141,10 +148,11 @@ def run_data_engineering(
         [
             {
                 "backend": str(backend),
+                "workload": workload.name,
                 "exp_id": exp_id,
                 **row,
                 "matched": len(matching),
-                "targets": len(TARGETS),
+                "targets": len(targets),
                 "config": config_struct,
             }
             for row in rows

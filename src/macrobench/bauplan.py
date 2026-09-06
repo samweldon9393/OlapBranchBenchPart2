@@ -1,27 +1,19 @@
 import os
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 import bauplan
 from dotenv import load_dotenv
 
-from src.macrobench.actions import Action
-from src.macrobench.checks import comparison_sql, matches_gold
+from src.macrobench.spec import Action, Fixture
 
 # Credentials come from .env file
 load_dotenv()
 
-FIXTURE_PROJECT = Path(__file__).parent / "projects" / "fixture"
-
-# What the fixture project leaves on the root branch; order_facts is a transient parent and is
-# deliberately not among them
-FIXTURE_TABLES = (
-    "feed_americas",
-    "feed_europe",
-    "feed_asia",
-    "gold_orders_unified",
-    "gold_revenue_by_nation_quarter",
-)
+# Bauplan does the work of a step by running a project, so every fixture and every target this
+# backend can build has a project here, named after it
+PROJECTS = Path(__file__).parent / "projects"
 
 
 def connect() -> bauplan.Client:
@@ -45,19 +37,20 @@ def create_root_branch(client: bauplan.Client, base_branch: str) -> str:
     return root_branch
 
 
-def materialize_fixture(client: bauplan.Client, branch: str, namespace: str) -> None:
-    """Run the fixture project on the branch, leaving the feeds and the gold tables behind.
+def materialize_fixture(client: bauplan.Client, branch: str, namespace: str, fixture: Fixture) -> None:
+    """Build the workload's fixture on the branch.
 
-    This is setup, not measurement: once it has run, the branch holds the untouched TPC-H tables
-    plus the drifted feeds and the gold tables the workload is checked against, so every timed step
-    can branch off it and inherit the whole fixture without regenerating anything.
+    This is setup, not measurement: once it has run, the branch holds whatever the workload needs
+    to start from, so every timed step can branch off it and inherit the lot without rebuilding
+    anything. The fixture names the tables it owes, and they are checked here so a fixture that
+    half-built fails now rather than as a workload that can never finish.
     """
-    state = client.run(project_dir=str(FIXTURE_PROJECT), ref=branch, namespace=namespace)
+    state = client.run(project_dir=str(PROJECTS / fixture.name), ref=branch, namespace=namespace)
     if str(state.job_status).lower() != "success":
         raise RuntimeError(f"fixture run {state.job_id} on {branch} failed: {state.job_status}")
 
     materialized = {table.name for table in client.get_tables(branch, filter_by_namespace=namespace)}
-    missing = set(FIXTURE_TABLES) - materialized
+    missing = set(fixture.tables) - materialized
     if missing:
         raise RuntimeError(f"fixture run left {branch}.{namespace} without: {', '.join(sorted(missing))}")
 
@@ -79,16 +72,16 @@ def merge_branch(client: bauplan.Client, source_ref: str, into_branch: str) -> N
 
 
 def mutate(client: bauplan.Client, branch: str, namespace: str, action: Action) -> bool:
-    """Run the action's project on the branch, materializing the model it rewrites.
+    """Apply the action's rewrite on the branch by running the target's project.
 
-    A run that fails is not an error the benchmark should stop for: writing a model that does not
+    A run that fails is not an error the benchmark should stop for: writing something that does not
     build is one of the ways an attempt can be wrong, and such a step gets pruned like any other
     dead end. Only Bauplan's own failures are swallowed, so a broken client or bad credentials
     still surface instead of looking like a very unlucky agent.
     """
     try:
         state = client.run(
-            project_dir=str(action.project_dir),
+            project_dir=str(PROJECTS / action.target),
             ref=branch,
             namespace=namespace,
             parameters={"variant": action.variant},
@@ -98,18 +91,20 @@ def mutate(client: bauplan.Client, branch: str, namespace: str, action: Action) 
     return str(state.job_status).lower() == "success"
 
 
-def evaluate(client: bauplan.Client, branch: str, namespace: str, built: frozenset[str]) -> frozenset[str]:
-    """Return the subset of the built models that reproduce their gold table exactly.
+def evaluate(client: bauplan.Client, branch: str, namespace: str, checks: Mapping[str, str]) -> frozenset[str]:
+    """Run each target's check on the branch and return the ones that pass.
 
-    A model that never materialized, or whose output will not typecheck against gold, raises out of
-    the comparison; that counts as not matching rather than as a benchmark failure.
+    The workload supplies the SQL and this only reads the boolean it returns, so what counts as
+    correct never has to be known here. A target that never materialized, or whose check will not
+    typecheck against what it built, raises out of the query; that counts as not passing rather
+    than as a benchmark failure.
     """
-    matching = set()
-    for target in built:
+    passing = set()
+    for target, sql in checks.items():
         try:
-            result = client.query(comparison_sql(target), ref=branch, namespace=namespace).to_pylist()[0]
+            result = client.query(sql, ref=branch, namespace=namespace).to_pylist()[0]
         except bauplan.exceptions.BauplanError:
             continue
-        if matches_gold(result):
-            matching.add(target)
-    return frozenset(matching)
+        if result["ok"]:
+            passing.add(target)
+    return frozenset(passing)
