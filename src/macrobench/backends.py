@@ -1,0 +1,69 @@
+"""The operations a backend has to provide for the macrobenchmark, and who provides them.
+
+Part 1 reduced a backend to five closures handed to a generic driver. The workloads here need a
+richer surface than that — they build tables and check them, not just branches — so the contract is
+a Protocol instead, and each backend module satisfies it structurally. The workload code then talks
+only to this interface, and adding Snowflake or Databricks means adding a module and a registry
+entry rather than touching the loop.
+
+The client is deliberately opaque: the workload only ever receives one and hands it back, so what
+it actually is stays the backend's business.
+"""
+
+from typing import Protocol
+
+from src.branch.cli import Backend
+from src.macrobench import bauplan as bauplan_backend
+from src.macrobench.actions import Action
+
+
+class MacroBackend(Protocol):
+    """What a backend must expose to run an end-to-end workload against it."""
+
+    # The tables the fixture leaves on the root branch for the workload to build on and check against
+    FIXTURE_TABLES: tuple[str, ...]
+
+    def connect(self) -> object:
+        """Open a client."""
+        ...
+
+    def create_root_branch(self, client: object, base_branch: str) -> str:
+        """Create the root branch off the base ref and return its name."""
+        ...
+
+    def materialize_fixture(self, client: object, branch: str, namespace: str) -> None:
+        """Put the feeds and the gold tables on the branch."""
+        ...
+
+    def create_branch(self, client: object, branch: str, from_ref: str) -> str:
+        """Branch off a ref and return the new branch's name."""
+        ...
+
+    def delete_branch(self, client: object, branch: str) -> None:
+        """Delete a branch."""
+        ...
+
+    def merge_branch(self, client: object, source_ref: str, into_branch: str) -> None:
+        """Merge a branch back into another one."""
+        ...
+
+    def materialize(self, client: object, branch: str, namespace: str, action: Action) -> bool:
+        """Apply the action's rewrite on the branch, reporting whether it built."""
+        ...
+
+    def evaluate(self, client: object, branch: str, namespace: str, built: frozenset[str]) -> frozenset[str]:
+        """Return the subset of the built models that reproduce their gold table exactly."""
+        ...
+
+
+BACKENDS: dict[Backend, MacroBackend] = {
+    Backend.bauplan: bauplan_backend,
+}
+
+
+def resolve(backend: Backend) -> MacroBackend:
+    """Look up the implementation for a backend, or say plainly that it does not have one yet."""
+    try:
+        return BACKENDS[backend]
+    except KeyError:
+        raise NotImplementedError(f"the macrobenchmark is not implemented for {backend} yet") from None

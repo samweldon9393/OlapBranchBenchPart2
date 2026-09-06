@@ -11,8 +11,8 @@ import typer
 
 from src.branch.cli import Backend
 from src.common.results import append_results
-from src.macrobench import bauplan as bauplan_backend
 from src.macrobench.actions import TARGETS, choose_action
+from src.macrobench.backends import resolve
 from src.macrobench.experiment import MacrobenchConfig, timed
 
 
@@ -29,18 +29,16 @@ def run_data_engineering(
     form a single deep chain; a step that does not is deleted, and the next attempt starts from the
     last good state. The run ends when every model matches or the agent runs out of steps.
     """
-    if backend is not Backend.bauplan:
-        raise NotImplementedError(f"the data engineering workload is not implemented for {backend} yet")
-
+    ops = resolve(backend)
     exp_id = str(uuid.uuid4())
     rng = random.Random(config.seed)
     rows: list[dict] = []
 
     # ---- setup, untimed ----
-    client = bauplan_backend.connect()
-    root_branch = bauplan_backend.create_root_branch(client, base_branch)
-    bauplan_backend.materialize_fixture(client, root_branch, config.namespace)
-    typer.echo(f"root branch {root_branch} ready with {len(bauplan_backend.FIXTURE_TABLES)} fixture tables")
+    client = ops.connect()
+    root_branch = ops.create_root_branch(client, base_branch)
+    ops.materialize_fixture(client, root_branch, config.namespace)
+    typer.echo(f"root branch {root_branch} ready with {len(ops.FIXTURE_TABLES)} fixture tables")
 
     head, matching, built = root_branch, frozenset(), frozenset()
     live_branches = [root_branch]
@@ -61,7 +59,7 @@ def run_data_engineering(
                 step,
                 action.target,
                 step_branch,
-                partial(bauplan_backend.create_branch, client, step_branch, head),
+                partial(ops.create_branch, client, step_branch, head),
             )
             rows.append(row)
             live_branches.append(branch)
@@ -71,7 +69,7 @@ def run_data_engineering(
                 step,
                 action.target,
                 branch,
-                partial(bauplan_backend.materialize, client, branch, config.namespace, action),
+                partial(ops.materialize, client, branch, config.namespace, action),
             )
             rows.append(row)
 
@@ -81,7 +79,7 @@ def run_data_engineering(
                 step,
                 action.target,
                 branch,
-                partial(bauplan_backend.evaluate, client, branch, config.namespace, candidate_built),
+                partial(ops.evaluate, client, branch, config.namespace, candidate_built),
             )
             rows.append(row)
 
@@ -93,7 +91,7 @@ def run_data_engineering(
                     step,
                     action.target,
                     branch,
-                    partial(bauplan_backend.delete_branch, client, branch),
+                    partial(ops.delete_branch, client, branch),
                 )
                 rows.append(row)
                 live_branches.remove(branch)
@@ -113,7 +111,7 @@ def run_data_engineering(
                 config.max_steps,
                 "",
                 head,
-                partial(bauplan_backend.merge_branch, client, head, root_branch),
+                partial(ops.merge_branch, client, head, root_branch),
             )
             rows.append(row)
 
@@ -136,7 +134,7 @@ def run_data_engineering(
         # ---- teardown, untimed ----
         # Children before parents, so a branch is never deleted while another still points at it
         for branch in reversed(live_branches):
-            bauplan_backend.delete_branch(client, branch)
+            ops.delete_branch(client, branch)
 
     config_struct = asdict(config)
     df = pl.DataFrame(
