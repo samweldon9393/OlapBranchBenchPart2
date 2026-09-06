@@ -44,10 +44,9 @@ class Action:
 class Workload:
     """A workload the benchmark can run end to end.
 
-    `checks` maps each target to SQL returning a single row with a boolean `ok` column; a backend
+    `checks` maps each target to SQL returning a single row with one boolean `ok` column; a backend
     runs it and reads that column, so deciding what "correct" means stays with the workload and
-    never leaks into the backend adapters. Any diagnostic columns alongside `ok` are ignored by the
-    loop and are there for whoever is reading a failed run.
+    never leaks into the backend adapters.
     """
 
     name: str

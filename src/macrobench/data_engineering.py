@@ -70,8 +70,7 @@ def _comparison_sql(target: str) -> str:
 
     The row counts are not redundant next to the symmetric difference: EXCEPT is a set operation, so
     a model that emits duplicate rows differs from gold by nothing while holding more rows than it.
-    That is exactly what the broken asia variant does, and the counts are what catch it. Both are
-    kept in the result alongside `ok` so a failed check says how badly it failed.
+    That is exactly what the broken asia variant does, and the counts are what catch it.
     """
     columns, actual_table, expected_table = _COMPARISONS[target]
     return f"""
@@ -84,7 +83,7 @@ def _comparison_sql(target: str) -> str:
                         (SELECT count(*) FROM actual) AS n_actual,
                         (SELECT count(*) FROM expected) AS n_expected
              )
-        SELECT diff = 0 AND n_actual = n_expected AS ok, diff, n_actual, n_expected FROM summary
+        SELECT diff = 0 AND n_actual = n_expected AS ok FROM summary
     """
 
 
