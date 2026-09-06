@@ -2,9 +2,11 @@
 
 Part 1 reduced a backend to five closures handed to a generic driver. The workloads here need a
 richer surface than that — they build tables and check them, not just branches — so the contract is
-a Protocol instead, and each backend module satisfies it structurally. The workload code then talks
-only to this interface, and adding Snowflake or Databricks means adding a module and a registry
-entry rather than touching the loop.
+a Protocol instead, and each backend module satisfies it structurally. This shared
+interface exposes the primitives necessary for the fundamental "branch/mutate/evaluate/prune"
+loop that characterizes the agentic workloads this benchmark attempts to approximate.
+The workload code then talks only to this interface, and adding a backend means adding a module and
+a registry entry rather than touching the loop.
 
 The client is deliberately opaque: the workload only ever receives one and hands it back, so what
 it actually is stays the backend's business.
@@ -47,7 +49,7 @@ class MacroBackend(Protocol):
         """Merge a branch back into another one."""
         ...
 
-    def materialize(self, client: object, branch: str, namespace: str, action: Action) -> bool:
+    def mutate(self, client: object, branch: str, namespace: str, action: Action) -> bool:
         """Apply the action's rewrite on the branch, reporting whether it built."""
         ...
 

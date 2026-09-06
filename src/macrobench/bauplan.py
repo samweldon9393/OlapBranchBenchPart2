@@ -78,7 +78,7 @@ def merge_branch(client: bauplan.Client, source_ref: str, into_branch: str) -> N
     client.merge_branch(source_ref=source_ref, into_branch=into_branch)
 
 
-def materialize(client: bauplan.Client, branch: str, namespace: str, action: Action) -> bool:
+def mutate(client: bauplan.Client, branch: str, namespace: str, action: Action) -> bool:
     """Run the action's project on the branch, materializing the model it rewrites.
 
     A run that fails is not an error the benchmark should stop for: writing a model that does not

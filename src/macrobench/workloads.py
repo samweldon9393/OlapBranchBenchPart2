@@ -65,11 +65,11 @@ def run_data_engineering(
             live_branches.append(branch)
 
             row, _ = timed(
-                "materialize",
+                "mutate",
                 step,
                 action.target,
                 branch,
-                partial(ops.materialize, client, branch, config.namespace, action),
+                partial(ops.mutate, client, branch, config.namespace, action),
             )
             rows.append(row)
 
