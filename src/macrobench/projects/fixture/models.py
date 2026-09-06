@@ -7,11 +7,6 @@ feed needs a UNION, which Bauplan SQL models do not support.
 All of the arithmetic lives in order_facts.sql, so each model here is a projection over a read of
 that parent: pyarrow only, no pip dependencies, no recomputation of the money columns that gold is
 compared against.
-
-Two Bauplan behaviours shape how these are written. Signatures are parsed with ast.literal_eval,
-so the column lists have to be literals rather than shared constants. And a read of a parent model
-does not preserve the order of `columns`, nor does a `filter=` on it reliably apply, so every model
-below picks its columns out by name and does its own filtering rather than trusting either.
 """
 
 import bauplan
