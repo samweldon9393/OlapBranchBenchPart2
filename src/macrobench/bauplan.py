@@ -123,7 +123,8 @@ def evaluate(
     for target, sql in checks.items():
         try:
             result = client.query(sql, ref=branch, namespace=namespace, cache=_cache_mode(cache)).to_pylist()[0]
-        except bauplan.exceptions.BauplanError:
+        except bauplan.exceptions.BauplanError as e:
+            print(f"check for {target} on {branch} failed: {e}")
             continue
         if result["ok"]:
             passing.add(target)
