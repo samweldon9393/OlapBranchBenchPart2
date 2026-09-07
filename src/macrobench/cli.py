@@ -13,8 +13,7 @@ import typer
 
 from src.branch.cli import Backend
 from src.macrobench.driver import run_workload
-from src.macrobench.experiment import MacrobenchConfig
-from src.macrobench.spec import Workload
+from src.macrobench.experiment import MacrobenchConfig, Workload
 from src.macrobench.workloads.data_engineering import WORKLOAD as DATA_ENGINEERING
 from src.macrobench.workloads.wap import WORKLOAD as WAP
 

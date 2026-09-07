@@ -14,8 +14,7 @@ import typer
 from src.branch.cli import Backend
 from src.common.results import append_results
 from src.macrobench.backends.protocol import MacroBackend, resolve
-from src.macrobench.experiment import MacrobenchConfig, timed
-from src.macrobench.spec import Action, Workload
+from src.macrobench.experiment import Action, MacrobenchConfig, Workload, timed
 from src.macrobench.tree import Node, Tree
 
 

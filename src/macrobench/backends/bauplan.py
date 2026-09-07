@@ -6,7 +6,7 @@ from pathlib import Path
 import bauplan
 from dotenv import load_dotenv
 
-from src.macrobench.spec import Action, Fixture
+from src.macrobench.experiment import Action, Fixture
 
 # Credentials come from .env file
 load_dotenv()
