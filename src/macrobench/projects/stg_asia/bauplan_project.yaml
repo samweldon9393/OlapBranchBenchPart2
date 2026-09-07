@@ -1,0 +1,7 @@
+project:
+  id: c03ef6af-fac5-4d86-ae81-7ac8d692ad0e
+  name: macrobench_stg_asia
+
+parameters:
+  variant:
+    default: correct
