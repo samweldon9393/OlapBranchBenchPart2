@@ -61,6 +61,7 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
             partial(ops.create_branch, client, branch, parent.branch),
         )
         step_rows.append(row)
+        tree.opened(branch)
 
         row, _ = timed(
             "mutate",
@@ -108,6 +109,7 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
                 partial(ops.delete_branch, client, branch),
             )
             step_rows.append(row)
+            tree.closed(branch)
 
         tree.finish(parent, child)
 
@@ -198,9 +200,15 @@ def run_workload(
         )
     finally:
         # ---- teardown, untimed ----
-        # Children before parents, so a branch is never deleted while another still points at it
-        for node in reversed(tree.nodes):
-            ops.delete_branch(client, node.branch)
+        # Every branch the run still has open, children before parents so one is never deleted
+        # while another still points at it. This works off the branches rather than the committed
+        # nodes so that a step which died mid-flight does not leave its branch behind, and it keeps
+        # going on failure so one undeletable branch does not strand all the others.
+        for branch in tree.remaining():
+            try:
+                ops.delete_branch(client, branch)
+            except Exception as error:  # noqa: BLE001 - the backend's exception types are its own
+                typer.echo(f"could not delete {branch}: {error}")
 
     committed = len(tree.nodes) - 1
     config_struct = asdict(config)

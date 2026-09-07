@@ -35,7 +35,26 @@ class Tree:
         self.workload, self.config, self.rng = workload, config, rng
         self.step = 0
         self.in_flight = 0
+        # Every branch the run has made and not yet deleted, committed or not, in creation order.
+        # Teardown works off this rather than off the nodes, so a step that died mid-flight does
+        # not leave its branch behind.
+        self.live_branches = [root.branch]
         self.cond = threading.Condition()
+
+    def opened(self, branch: str) -> None:
+        """Record a branch the run just created."""
+        with self.cond:
+            self.live_branches.append(branch)
+
+    def closed(self, branch: str) -> None:
+        """Record a branch the run just deleted."""
+        with self.cond:
+            self.live_branches.remove(branch)
+
+    def remaining(self) -> list[str]:
+        """Branches still to clean up, children before parents."""
+        with self.cond:
+            return list(reversed(self.live_branches))
 
     def _fanout(self, node: Node) -> int:
         return self.config.root_fanout if node.depth == 0 else self.config.inner_fanout
