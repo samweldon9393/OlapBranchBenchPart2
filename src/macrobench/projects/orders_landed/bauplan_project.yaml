@@ -1,0 +1,9 @@
+project:
+  id: 9c24d05a-4df3-455e-9253-72ba26646dfb
+  name: macrobench_orders_landed
+
+parameters:
+  variant:
+    default: correct
+  batch_id:
+    default: "1"

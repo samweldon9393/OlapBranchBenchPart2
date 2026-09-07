@@ -5,7 +5,9 @@ DAG the agent walks, and how each model is judged against gold. The loop and the
 read it through the Workload interface and know none of it.
 """
 
-from src.macrobench.spec import Fixture, Workload
+import random
+
+from src.macrobench.spec import Action, Fixture, Workload
 
 # The drifted feeds the agent has to standardize, and the gold tables it is judged against. Gold is
 # computed from the untouched TPC-H tables rather than from the feeds, so reproducing it means the
@@ -87,10 +89,33 @@ def _comparison_sql(target: str) -> str:
     """
 
 
+def choose_action(
+    workload: Workload, rng: random.Random, parent_state: frozenset[str], step: int, p_correct: float
+) -> Action | None:
+    """Pick the next model to rewrite, or None when nothing is attemptable from this parent.
+
+    A target is attemptable when it is not already passing on the parent and everything it reads
+    is, so the agent walks up the DAG instead of thrashing and never builds on top of a broken
+    parent. Whether it gets the rewrite right is a coin flip weighted by p_correct, so a lower
+    value means more dead ends and a longer walk to the same finished state. The step counter is
+    unused here; this workload's choice depends only on what the parent already has.
+    """
+    attemptable = [
+        target
+        for target in workload.targets
+        if target not in parent_state and workload.dependencies[target] <= parent_state
+    ]
+    if not attemptable:
+        return None
+    return Action(target=rng.choice(attemptable), correct=rng.random() < p_correct)
+
+
 WORKLOAD = Workload(
     name="data_engineering",
     fixture=FIXTURE,
     targets=TARGETS,
     dependencies=DEPENDENCIES,
-    checks={target: _comparison_sql(target) for target in TARGETS},
+    # One check per target, keyed by the target's own name
+    checks={target: {target: _comparison_sql(target)} for target in TARGETS},
+    choose_action=choose_action,
 )

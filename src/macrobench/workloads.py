@@ -1,6 +1,8 @@
+import json
 import random
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import UTC, datetime
 from functools import partial
@@ -11,9 +13,145 @@ import typer
 
 from src.branch.cli import Backend
 from src.common.results import append_results
-from src.macrobench.backends import resolve
+from src.macrobench.backends import MacroBackend, resolve
 from src.macrobench.experiment import MacrobenchConfig, timed
-from src.macrobench.spec import Workload, choose_action
+from src.macrobench.spec import Workload
+from src.macrobench.tree import Node, Tree
+
+
+def _max_attempts(config: MacrobenchConfig) -> int:
+    """How many times a step may be tried before the run gives up on it.
+
+    Merges are resolved per key, so of several workers publishing into the same parent only the
+    first wins; the losers' branches are anchored to a commit the parent has moved past and cannot
+    be merged again at all, however many times they are asked, so the step is redone instead.
+
+    A loser does not simply queue behind the other n_workers - 1: while it redoes its step, the
+    others claim fresh steps and publish those too, so it can keep losing. Against a backend that
+    conflicts the same way, the unluckiest step needed 14 attempts at 4 workers and 21 at 8 —
+    around three and a half times the worker count. The bound is set well above that, generous
+    enough not to fail a run that is merely unlucky while still ending one that is going nowhere.
+    """
+    return max(8, 6 * config.n_workers)
+
+
+def _try_merge(ops: MacroBackend, client: object, source_ref: str, into_branch: str) -> Exception | None:
+    """Merge, handing back the failure instead of raising so a losing attempt can still be timed."""
+    try:
+        ops.merge_branch(client, source_ref, into_branch)
+    except Exception as error:  # noqa: BLE001 - the backend's exception types are its own
+        return error
+    return None
+
+
+def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: MacrobenchConfig) -> list[dict]:
+    """Run steps until the tree says the run is done, returning this worker's result rows.
+
+    The worker owns its client — connectors are not thread safe, and building one must never land
+    inside a measured region — and touches shared state only through claim and finish.
+    """
+    client = ops.connect()
+    rows: list[dict] = []
+
+    while (claim := tree.claim()) is not None:
+        parent, action, step = claim
+        params = dict(action.params)
+        # Everything the parent already had, plus what this step is attempting
+        built = parent.state | {action.target}
+        checks = {name: sql.format(**params) for target in built for name, sql in workload.checks[target].items()}
+
+        step_rows: list[dict] = []
+        child = None
+        accepted = False
+        passing: frozenset[str] = frozenset()
+        conflict: Exception | None = None
+        attempts = _max_attempts(config)
+
+        for attempt in range(1, attempts + 1):
+            # A retry is a fresh branch off the parent as it now stands. The branch that lost the
+            # race is anchored to a commit the parent has moved past, so its work has to be redone
+            # rather than merged again.
+            suffix = "" if attempt == 1 else f"_a{attempt}"
+            branch = f"{tree.root.branch}_s{step}{suffix}"
+
+            row, _ = timed(
+                "create_branch",
+                step,
+                action.target,
+                branch,
+                partial(ops.create_branch, client, branch, parent.branch),
+            )
+            step_rows.append(row)
+            tree.opened(branch)
+
+            row, _ = timed(
+                "mutate",
+                step,
+                action.target,
+                branch,
+                partial(ops.mutate, client, branch, config.namespace, action, config.cache),
+            )
+            step_rows.append(row)
+
+            row, passing = timed(
+                "evaluate",
+                step,
+                action.target,
+                branch,
+                partial(ops.evaluate, client, branch, config.namespace, checks, config.cache),
+            )
+            step_rows.append(row)
+            accepted = passing == frozenset(checks)
+
+            if accepted and not config.merge_on_commit:
+                # The branch stays, and later steps can build on top of it
+                child = Node(branch, parent, parent.depth + 1, built)
+                break
+
+            if accepted:
+                # The work lands on the parent, so the branch never joins the tree
+                row, conflict = timed(
+                    "merge_branch",
+                    step,
+                    action.target,
+                    branch,
+                    partial(_try_merge, ops, client, branch, parent.branch),
+                )
+                row["merge_attempt"] = attempt
+                step_rows.append(row)
+
+            row, _ = timed(
+                "delete_branch",
+                step,
+                action.target,
+                branch,
+                partial(ops.delete_branch, client, branch),
+            )
+            step_rows.append(row)
+            tree.closed(branch)
+
+            # Rejected, or published: either way this step is done. Only a lost race goes round again.
+            if not accepted or conflict is None:
+                break
+        else:
+            raise RuntimeError(f"step {step} lost the race {attempts} times running") from conflict
+
+        tree.finish(parent, child)
+
+        for step_row in step_rows:
+            step_row.update(
+                parent=parent.branch,
+                depth=parent.depth + 1,
+                accepted=accepted,
+                correct=action.correct,
+                params=json.dumps(params),
+                failed_checks=sorted(frozenset(checks) - passing),
+                # How many tries the step took, on every row so a step's cost can be read off any of them
+                attempts=attempt,
+            )
+        rows.extend(step_rows)
+
+    return rows
 
 
 def run_workload(
@@ -25,19 +163,16 @@ def run_workload(
 ) -> pl.DataFrame:
     """Run one workload end to end: branch, mutate, evaluate, keep or prune.
 
-    The agent walks up the workload's DAG, and each step is one attempt at one target. A step that
-    improves the set of passing targets becomes the new head, so the successful attempts form a
-    single deep chain; a step that does not is deleted, and the next attempt starts from the last
-    good state. The run ends when every target passes or the agent runs out of steps.
+    Each step branches off a committed node, attempts one target on it, and checks the result. A
+    step whose every check passes is committed — merged into its parent right away, or kept as a
+    branch others can build on; anything else is deleted and its parent's slot freed. The tree the
+    committed steps form is whatever the fanout numbers say: a chain, a star, or something bushier.
 
-    Nothing below is specific to a workload: what to build and how it is judged all come off the
-    Workload, so the four of them share this loop.
+    Nothing here is specific to a workload or a backend: what to build, how it is judged, and what
+    to try next all come off the Workload, and the operations come off the backend adapter.
     """
     ops = resolve(backend)
     exp_id = str(uuid.uuid4())
-    rng = random.Random(config.seed)
-    rows: list[dict] = []
-    targets = workload.targets
 
     # ---- setup, untimed ----
     client = ops.connect()
@@ -45,80 +180,32 @@ def run_workload(
     ops.materialize_fixture(client, root_branch, config.namespace, workload.fixture, config.cache)
     typer.echo(f"root branch {root_branch} ready with {len(workload.fixture.tables)} fixture tables")
 
-    head, passing = root_branch, frozenset()
-    live_branches = [root_branch]
+    tree = Tree(Node(root_branch, None, 0, frozenset()), workload, config, random.Random(config.seed))
+    rows: list[dict] = []
 
-    # ---- timed loop ----
+    # ---- timed region ----
     workload_started_at = datetime.now(tz=UTC)
     workload_perf_start = time.perf_counter()
     try:
-        for step in range(config.max_steps):
-            action = choose_action(workload, rng, passing, config.p_correct)
-            if action is None:
-                break
+        with ThreadPoolExecutor(max_workers=config.n_workers) as pool:
+            per_worker = list(pool.map(lambda _: _worker(tree, ops, workload, config), range(config.n_workers)))
+        rows = [row for worker_rows in per_worker for row in worker_rows]
 
-            # Branch name is built outside the measured region, the way part 1 does it
-            step_branch = f"{root_branch}_s{step}"
-            row, branch = timed(
-                "create_branch",
-                step,
-                action.target,
-                step_branch,
-                partial(ops.create_branch, client, step_branch, head),
-            )
-            rows.append(row)
-            live_branches.append(branch)
-
-            row, _ = timed(
-                "mutate",
-                step,
-                action.target,
-                branch,
-                partial(ops.mutate, client, branch, config.namespace, action, config.cache),
-            )
-            rows.append(row)
-
-            candidate = passing | {action.target}
-            # Only what has been built can pass, so the check set follows the chain up the DAG
-            candidate_checks = {target: workload.checks[target] for target in candidate}
-            row, new_passing = timed(
-                "evaluate",
-                step,
-                action.target,
-                branch,
-                partial(ops.evaluate, client, branch, config.namespace, candidate_checks, config.cache),
-            )
-            rows.append(row)
-
-            if len(new_passing) > len(passing):
-                head, passing = branch, new_passing
-            else:
-                row, _ = timed(
-                    "delete_branch",
-                    step,
-                    action.target,
-                    branch,
-                    partial(ops.delete_branch, client, branch),
-                )
-                rows.append(row)
-                live_branches.remove(branch)
-
-            typer.echo(
-                f"step {step}: {action.target} ({action.variant}) -> "
-                f"{len(passing)}/{len(targets)} passing, head {head}"
-            )
-
-            if len(passing) == len(targets):
-                break
-
-        # Publishing the finished chain is part of the workload, so it is timed like the rest
-        if head != root_branch:
+        # When steps merge as they go there is nothing left to publish; the root already has it all.
+        # Otherwise the run ends holding a tree of committed branches and has to pick one to publish.
+        # Only leaves are candidates — a node with children is an ancestor of a branch that carries
+        # strictly more work, so publishing it would throw that work away. Among the leaves the best
+        # one is whichever carries the most targets built and passing, since state only grows down a
+        # path. For a chain that is just the head, the single deepest branch. Ties (two paths that
+        # got equally far) are broken arbitrarily, which only arises once a run is bushy.
+        if not config.merge_on_commit and (leaves := tree.leaves()):
+            best = max(leaves, key=lambda node: len(node.state))
             row, _ = timed(
                 "merge_branch",
-                config.max_steps,
+                -1,
                 "",
-                head,
-                partial(ops.merge_branch, client, head, root_branch),
+                best.branch,
+                partial(ops.merge_branch, client, best.branch, root_branch),
             )
             rows.append(row)
 
@@ -139,10 +226,17 @@ def run_workload(
         )
     finally:
         # ---- teardown, untimed ----
-        # Children before parents, so a branch is never deleted while another still points at it
-        for branch in reversed(live_branches):
-            ops.delete_branch(client, branch)
+        # Every branch the run still has open, children before parents so one is never deleted
+        # while another still points at it. This works off the branches rather than the committed
+        # nodes so that a step which died mid-flight does not leave its branch behind, and it keeps
+        # going on failure so one undeletable branch does not strand all the others.
+        for branch in tree.remaining():
+            try:
+                ops.delete_branch(client, branch)
+            except Exception as error:  # noqa: BLE001 - the backend's exception types are its own
+                typer.echo(f"could not delete {branch}: {error}")
 
+    committed = len(tree.nodes) - 1
     config_struct = asdict(config)
     df = pl.DataFrame(
         [
@@ -151,8 +245,8 @@ def run_workload(
                 "workload": workload.name,
                 "exp_id": exp_id,
                 **row,
-                "passing": len(passing),
-                "targets": len(targets),
+                "committed": committed,
+                "steps": tree.step,
                 "config": config_struct,
             }
             for row in rows

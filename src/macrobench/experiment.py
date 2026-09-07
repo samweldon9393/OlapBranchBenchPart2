@@ -18,13 +18,24 @@ class MacrobenchConfig:
     time a lookup instead of the build, and how warm it was would depend on what had been run
     before, on that account, from that machine. Turning it on is a legitimate thing to measure, but
     it has to be a recorded choice rather than a default nobody set.
+
+    The three fanout numbers are the whole topology: a chain is root_fanout=1, inner_fanout=1; a
+    star is max_depth=1 with inner_fanout=0; anything bushier is a bigger root_fanout and a
+    non-zero inner_fanout.
     """
 
     seed: int = 0
-    max_steps: int = 20
-    p_correct: float = 0.7
     namespace: str = "tpch_1"
     cache: bool = False
+    p_correct: float = 0.7
+    # tree shape
+    root_fanout: int = 1
+    inner_fanout: int = 1
+    max_depth: int = 50
+    max_steps: int = 20
+    # execution
+    n_workers: int = 1
+    merge_on_commit: bool = False
 
 
 def timed[R](operation: str, step: int, target: str, branch_name: str, op: Callable[[], R]) -> tuple[dict, R]:
