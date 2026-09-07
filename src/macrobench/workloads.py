@@ -45,7 +45,7 @@ def run_workload(
     ops.materialize_fixture(client, root_branch, config.namespace, workload.fixture, config.cache)
     typer.echo(f"root branch {root_branch} ready with {len(workload.fixture.tables)} fixture tables")
 
-    head, matching, built = root_branch, frozenset(), frozenset()
+    head, passing = root_branch, frozenset()
     live_branches = [root_branch]
 
     # ---- timed loop ----
@@ -53,7 +53,7 @@ def run_workload(
     workload_perf_start = time.perf_counter()
     try:
         for step in range(config.max_steps):
-            action = choose_action(workload, rng, matching, built, config.p_correct)
+            action = choose_action(workload, rng, passing, config.p_correct)
             if action is None:
                 break
 
@@ -78,10 +78,10 @@ def run_workload(
             )
             rows.append(row)
 
-            candidate_built = built | {action.target}
+            candidate = passing | {action.target}
             # Only what has been built can pass, so the check set follows the chain up the DAG
-            candidate_checks = {target: workload.checks[target] for target in candidate_built}
-            row, new_matching = timed(
+            candidate_checks = {target: workload.checks[target] for target in candidate}
+            row, new_passing = timed(
                 "evaluate",
                 step,
                 action.target,
@@ -90,8 +90,8 @@ def run_workload(
             )
             rows.append(row)
 
-            if len(new_matching) > len(matching):
-                head, matching, built = branch, new_matching, candidate_built
+            if len(new_passing) > len(passing):
+                head, passing = branch, new_passing
             else:
                 row, _ = timed(
                     "delete_branch",
@@ -105,10 +105,10 @@ def run_workload(
 
             typer.echo(
                 f"step {step}: {action.target} ({action.variant}) -> "
-                f"{len(matching)}/{len(targets)} matching, head {head}"
+                f"{len(passing)}/{len(targets)} passing, head {head}"
             )
 
-            if len(matching) == len(targets):
+            if len(passing) == len(targets):
                 break
 
         # Publishing the finished chain is part of the workload, so it is timed like the rest
@@ -151,7 +151,7 @@ def run_workload(
                 "workload": workload.name,
                 "exp_id": exp_id,
                 **row,
-                "matched": len(matching),
+                "passing": len(passing),
                 "targets": len(targets),
                 "config": config_struct,
             }
