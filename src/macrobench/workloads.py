@@ -129,7 +129,7 @@ def run_workload(
         rows.append(
             {
                 "step": -1,
-                "operation": "workload",
+                "operation": f"{workload.name}_workload",
                 "target": "",
                 "branch_name": root_branch,
                 "duration_s": workload_duration_s,
