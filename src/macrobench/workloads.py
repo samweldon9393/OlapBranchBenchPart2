@@ -15,7 +15,7 @@ from src.branch.cli import Backend
 from src.common.results import append_results
 from src.macrobench.backends import MacroBackend, resolve
 from src.macrobench.experiment import MacrobenchConfig, timed
-from src.macrobench.spec import Workload
+from src.macrobench.spec import Action, Workload
 from src.macrobench.tree import Node, Tree
 
 
@@ -33,6 +33,20 @@ def _max_attempts(config: MacrobenchConfig) -> int:
     enough not to fail a run that is merely unlucky while still ending one that is going nowhere.
     """
     return max(8, 6 * config.n_workers)
+
+
+def _note(label: str, message: str) -> None:
+    """A line about the run as a whole.
+
+    Every log line is written in one call, so lines from workers running at once do not interleave.
+    """
+    typer.echo(f"{label:<8} {message}")
+
+
+def _step_note(step: int, config: MacrobenchConfig, action: Action, state: str, detail: str = "") -> None:
+    """A line about one step, so a long run visibly makes progress instead of just sitting there."""
+    where = f"{step + 1:>3}/{config.max_steps}"
+    typer.echo(f"{'step':<8} {where:<8} {action.target:<26} {action.variant:<8} {state:<10} {detail}".rstrip())
 
 
 def _try_merge(ops: MacroBackend, client: object, source_ref: str, into_branch: str) -> Exception | None:
@@ -73,6 +87,8 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
             # rather than merged again.
             suffix = "" if attempt == 1 else f"_a{attempt}"
             branch = f"{tree.root.branch}_s{step}{suffix}"
+            attempt_start = time.perf_counter()
+            _step_note(step, config, action, "start", f"off {parent.branch.rsplit('.', 1)[-1]}")
 
             row, _ = timed(
                 "create_branch",
@@ -106,6 +122,7 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
             if accepted and not config.merge_on_commit:
                 # The branch stays, and later steps can build on top of it
                 child = Node(branch, parent, parent.depth + 1, built)
+                _step_note(step, config, action, "kept", f"{time.perf_counter() - attempt_start:.1f}s")
                 break
 
             if accepted:
@@ -129,6 +146,15 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
             )
             step_rows.append(row)
             tree.closed(branch)
+
+            took = f"{time.perf_counter() - attempt_start:.1f}s"
+            if not accepted:
+                failed = ", ".join(sorted(frozenset(checks) - passing))
+                _step_note(step, config, action, "rejected", f"{took}  failed: {failed}")
+            elif conflict is None:
+                _step_note(step, config, action, "published", took)
+            else:
+                _step_note(step, config, action, "conflict", f"{took}  retrying, attempt {attempt + 1}/{attempts}")
 
             # Rejected, or published: either way this step is done. Only a lost race goes round again.
             if not accepted or conflict is None:
@@ -175,10 +201,13 @@ def run_workload(
     exp_id = str(uuid.uuid4())
 
     # ---- setup, untimed ----
+    _note("setup", f"{workload.name} on {backend}, {config.n_workers} worker(s), up to {config.max_steps} steps")
     client = ops.connect()
     root_branch = ops.create_root_branch(client, base_branch)
+    _note("setup", f"root branch {root_branch} off {base_branch}")
+    _note("setup", f"building fixture {workload.fixture.name}")
     ops.materialize_fixture(client, root_branch, config.namespace, workload.fixture, config.cache)
-    typer.echo(f"root branch {root_branch} ready with {len(workload.fixture.tables)} fixture tables")
+    _note("setup", f"fixture ready with {len(workload.fixture.tables)} tables")
 
     tree = Tree(Node(root_branch, None, 0, frozenset()), workload, config, random.Random(config.seed))
     rows: list[dict] = []
@@ -211,6 +240,12 @@ def run_workload(
 
         workload_duration_s = time.perf_counter() - workload_perf_start
         workload_ended_at = datetime.now(tz=UTC)
+        retries = sum(1 for row in rows if row["operation"] == "mutate") - tree.step
+        _note(
+            "done",
+            f"{tree.step} steps, {len(tree.nodes) - 1} kept, {retries} redone "
+            f"in {workload_duration_s:.1f}s",
+        )
         # The whole timed region as one row, so a run's end-to-end cost is queryable without
         # having to re-add the per-operation durations and the gaps between them
         rows.append(
@@ -230,11 +265,13 @@ def run_workload(
         # while another still points at it. This works off the branches rather than the committed
         # nodes so that a step which died mid-flight does not leave its branch behind, and it keeps
         # going on failure so one undeletable branch does not strand all the others.
-        for branch in tree.remaining():
+        leftover = tree.remaining()
+        _note("teardown", f"deleting {len(leftover)} branch(es)")
+        for branch in leftover:
             try:
                 ops.delete_branch(client, branch)
             except Exception as error:  # noqa: BLE001 - the backend's exception types are its own
-                typer.echo(f"could not delete {branch}: {error}")
+                _note("teardown", f"could not delete {branch}: {error}")
 
     committed = len(tree.nodes) - 1
     config_struct = asdict(config)
