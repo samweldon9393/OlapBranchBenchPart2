@@ -11,12 +11,20 @@ class MacrobenchConfig:
     The seed makes a run reproducible: it drives both which model the agent rewrites at each step
     and whether that rewrite is a correct one, so the same seed replays the same sequence of
     successes and dead ends.
+
+    Caching is off by default and always passed explicitly, never left to the platform or the
+    profile to resolve. The workload repeats identical work constantly — the same correct rewrite
+    of a model gets built on many branches, across steps and across seeds — so a warm cache would
+    time a lookup instead of the build, and how warm it was would depend on what had been run
+    before, on that account, from that machine. Turning it on is a legitimate thing to measure, but
+    it has to be a recorded choice rather than a default nobody set.
     """
 
     seed: int = 0
     max_steps: int = 20
     p_correct: float = 0.7
     namespace: str = "tpch_1"
+    cache: bool = False
 
 
 def timed[R](operation: str, step: int, target: str, branch_name: str, op: Callable[[], R]) -> tuple[dict, R]:

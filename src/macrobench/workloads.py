@@ -42,7 +42,7 @@ def run_workload(
     # ---- setup, untimed ----
     client = ops.connect()
     root_branch = ops.create_root_branch(client, base_branch)
-    ops.materialize_fixture(client, root_branch, config.namespace, workload.fixture)
+    ops.materialize_fixture(client, root_branch, config.namespace, workload.fixture, config.cache)
     typer.echo(f"root branch {root_branch} ready with {len(workload.fixture.tables)} fixture tables")
 
     head, matching, built = root_branch, frozenset(), frozenset()
@@ -74,7 +74,7 @@ def run_workload(
                 step,
                 action.target,
                 branch,
-                partial(ops.mutate, client, branch, config.namespace, action),
+                partial(ops.mutate, client, branch, config.namespace, action, config.cache),
             )
             rows.append(row)
 
@@ -86,7 +86,7 @@ def run_workload(
                 step,
                 action.target,
                 branch,
-                partial(ops.evaluate, client, branch, config.namespace, candidate_checks),
+                partial(ops.evaluate, client, branch, config.namespace, candidate_checks, config.cache),
             )
             rows.append(row)
 

@@ -35,7 +35,9 @@ class MacroBackend(Protocol):
         """Create the root branch off the base ref and return its name."""
         ...
 
-    def materialize_fixture(self, client: object, branch: str, namespace: str, fixture: Fixture) -> None:
+    def materialize_fixture(
+        self, client: object, branch: str, namespace: str, fixture: Fixture, cache: bool = False
+    ) -> None:
         """Build the workload's fixture on the branch, and check it left the tables it owes."""
         ...
 
@@ -51,11 +53,13 @@ class MacroBackend(Protocol):
         """Merge a branch back into another one."""
         ...
 
-    def mutate(self, client: object, branch: str, namespace: str, action: Action) -> bool:
+    def mutate(self, client: object, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
         """Apply the action's rewrite on the branch, reporting whether it built."""
         ...
 
-    def evaluate(self, client: object, branch: str, namespace: str, checks: Mapping[str, str]) -> frozenset[str]:
+    def evaluate(
+        self, client: object, branch: str, namespace: str, checks: Mapping[str, str], cache: bool = False
+    ) -> frozenset[str]:
         """Run each target's check SQL on the branch and return the targets whose `ok` came back true."""
         ...
 
