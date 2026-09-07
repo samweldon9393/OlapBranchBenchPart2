@@ -18,24 +18,30 @@ from src.macrobench.experiment import MacrobenchConfig, timed
 from src.macrobench.spec import Workload
 from src.macrobench.tree import Node, Tree
 
-# Merge contention on a shared parent is one of the things these workloads exist to measure, so a
-# merge that loses a race is retried rather than failing the run
-MERGE_ATTEMPTS = 3
-MERGE_RETRY_S = 0.5
+
+def _max_attempts(config: MacrobenchConfig) -> int:
+    """How many times a step may be tried before the run gives up on it.
+
+    Merges are resolved per key, so of several workers publishing into the same parent only the
+    first wins; the losers' branches are anchored to a commit the parent has moved past and cannot
+    be merged again at all, however many times they are asked, so the step is redone instead.
+
+    A loser does not simply queue behind the other n_workers - 1: while it redoes its step, the
+    others claim fresh steps and publish those too, so it can keep losing. Against a backend that
+    conflicts the same way, the unluckiest step needed 14 attempts at 4 workers and 21 at 8 —
+    around three and a half times the worker count. The bound is set well above that, generous
+    enough not to fail a run that is merely unlucky while still ending one that is going nowhere.
+    """
+    return max(8, 6 * config.n_workers)
 
 
-def _merge_with_retry(ops: MacroBackend, client: object, source_ref: str, into_branch: str) -> int:
-    """Merge, retrying a losing race a couple of times. Returns how many attempts it took."""
-    for attempt in range(1, MERGE_ATTEMPTS + 1):
-        try:
-            ops.merge_branch(client, source_ref, into_branch)
-        except Exception:
-            if attempt == MERGE_ATTEMPTS:
-                raise
-            time.sleep(MERGE_RETRY_S)
-        else:
-            return attempt
-    raise AssertionError("unreachable")
+def _try_merge(ops: MacroBackend, client: object, source_ref: str, into_branch: str) -> Exception | None:
+    """Merge, handing back the failure instead of raising so a losing attempt can still be timed."""
+    try:
+        ops.merge_branch(client, source_ref, into_branch)
+    except Exception as error:  # noqa: BLE001 - the backend's exception types are its own
+        return error
+    return None
 
 
 def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: MacrobenchConfig) -> list[dict]:
@@ -49,58 +55,71 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
 
     while (claim := tree.claim()) is not None:
         parent, action, step = claim
-        branch = f"{tree.root.branch}_s{step}"
         params = dict(action.params)
-        step_rows = []
-
-        row, _ = timed(
-            "create_branch",
-            step,
-            action.target,
-            branch,
-            partial(ops.create_branch, client, branch, parent.branch),
-        )
-        step_rows.append(row)
-        tree.opened(branch)
-
-        row, _ = timed(
-            "mutate",
-            step,
-            action.target,
-            branch,
-            partial(ops.mutate, client, branch, config.namespace, action, config.cache),
-        )
-        step_rows.append(row)
-
-        # Everything the parent already had, plus what this step just attempted
+        # Everything the parent already had, plus what this step is attempting
         built = parent.state | {action.target}
         checks = {name: sql.format(**params) for target in built for name, sql in workload.checks[target].items()}
-        row, passing = timed(
-            "evaluate",
-            step,
-            action.target,
-            branch,
-            partial(ops.evaluate, client, branch, config.namespace, checks, config.cache),
-        )
-        step_rows.append(row)
 
-        accepted = passing == frozenset(checks)
-        merge_attempts = None
+        step_rows: list[dict] = []
         child = None
-        if accepted and config.merge_on_commit:
-            # The work lands on the parent and the branch is done with, so it never joins the tree
-            row, merge_attempts = timed(
-                "merge_branch",
+        accepted = False
+        passing: frozenset[str] = frozenset()
+        conflict: Exception | None = None
+        attempts = _max_attempts(config)
+
+        for attempt in range(1, attempts + 1):
+            # A retry is a fresh branch off the parent as it now stands. The branch that lost the
+            # race is anchored to a commit the parent has moved past, so its work has to be redone
+            # rather than merged again.
+            suffix = "" if attempt == 1 else f"_a{attempt}"
+            branch = f"{tree.root.branch}_s{step}{suffix}"
+
+            row, _ = timed(
+                "create_branch",
                 step,
                 action.target,
                 branch,
-                partial(_merge_with_retry, ops, client, branch, parent.branch),
+                partial(ops.create_branch, client, branch, parent.branch),
             )
             step_rows.append(row)
-        elif accepted:
-            child = Node(branch, parent, parent.depth + 1, built)
+            tree.opened(branch)
 
-        if child is None:
+            row, _ = timed(
+                "mutate",
+                step,
+                action.target,
+                branch,
+                partial(ops.mutate, client, branch, config.namespace, action, config.cache),
+            )
+            step_rows.append(row)
+
+            row, passing = timed(
+                "evaluate",
+                step,
+                action.target,
+                branch,
+                partial(ops.evaluate, client, branch, config.namespace, checks, config.cache),
+            )
+            step_rows.append(row)
+            accepted = passing == frozenset(checks)
+
+            if accepted and not config.merge_on_commit:
+                # The branch stays, and later steps can build on top of it
+                child = Node(branch, parent, parent.depth + 1, built)
+                break
+
+            if accepted:
+                # The work lands on the parent, so the branch never joins the tree
+                row, conflict = timed(
+                    "merge_branch",
+                    step,
+                    action.target,
+                    branch,
+                    partial(_try_merge, ops, client, branch, parent.branch),
+                )
+                row["merge_attempt"] = attempt
+                step_rows.append(row)
+
             row, _ = timed(
                 "delete_branch",
                 step,
@@ -110,6 +129,12 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
             )
             step_rows.append(row)
             tree.closed(branch)
+
+            # Rejected, or published: either way this step is done. Only a lost race goes round again.
+            if not accepted or conflict is None:
+                break
+        else:
+            raise RuntimeError(f"step {step} lost the race {attempts} times running") from conflict
 
         tree.finish(parent, child)
 
@@ -121,7 +146,8 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
                 correct=action.correct,
                 params=json.dumps(params),
                 failed_checks=sorted(frozenset(checks) - passing),
-                merge_attempts=merge_attempts if step_row["operation"] == "merge_branch" else None,
+                # How many tries the step took, on every row so a step's cost can be read off any of them
+                attempts=attempt,
             )
         rows.extend(step_rows)
 
