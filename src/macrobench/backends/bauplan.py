@@ -13,7 +13,7 @@ load_dotenv()
 
 # Bauplan does the work of a step by running a project, so every fixture and every target this
 # backend can build has a project here, named after it
-PROJECTS = Path(__file__).parent / "projects"
+PROJECTS = Path(__file__).parents[1] / "workloads" / "projects"
 
 
 def _cache_mode(cache: bool) -> str:

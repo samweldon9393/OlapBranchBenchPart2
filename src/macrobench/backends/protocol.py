@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from typing import Protocol
 
 from src.branch.cli import Backend
-from src.macrobench import bauplan as bauplan_backend
+from src.macrobench.backends import bauplan as bauplan_backend
 from src.macrobench.spec import Action, Fixture
 
 
