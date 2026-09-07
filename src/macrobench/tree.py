@@ -12,8 +12,7 @@ import random
 import threading
 from dataclasses import dataclass
 
-from src.macrobench.experiment import MacrobenchConfig
-from src.macrobench.spec import Action, Workload
+from src.macrobench.experiment import Action, MacrobenchConfig, Workload
 
 
 @dataclass

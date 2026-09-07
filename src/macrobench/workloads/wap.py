@@ -7,7 +7,7 @@ into that shared root, which is much of what this workload measures.
 
 import random
 
-from src.macrobench.spec import Action, Fixture, Workload
+from src.macrobench.experiment import Action, Fixture, Workload
 
 # Batch ids the fixture splits orders into; see projects/wap_fixture/orders_batched.sql
 N_BATCHES = 61

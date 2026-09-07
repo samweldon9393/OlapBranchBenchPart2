@@ -1,19 +1,33 @@
 # OlapBranchBench
 
-Benchmark of data-branching latency across three backends (Bauplan, Databricks, Snowflake) over the same dataset. Each run times the creation and the deletion of a branch (or the per-backend equivalent) and appends the measurements to a single parquet file.
+Benchmarks of data branching across three backends (Bauplan, Databricks, Snowflake) over the same dataset, in two parts.
+
+**Part 1** measures the branching primitives on their own: each run times the creation and the deletion of a branch (or the per-backend equivalent) and appends the measurements to a single parquet file.
+
+**Part 2** measures the same backends on end-to-end workloads that contain branching, so the primitive is timed alongside the work that surrounds it in practice.
 
 ## Table of contents
 
 - [Overview](#overview)
 - [Setup](#setup)
 - [Dataset](#dataset)
-- [Running a benchmark](#running-a-benchmark)
-- [Branching across backends](#branching-across-backends)
-- [Results](#results)
+- [Part 1: branching primitives](#part-1-branching-primitives)
+  - [Running a benchmark](#running-a-benchmark)
+  - [Branching across backends](#branching-across-backends)
+  - [Results](#results)
+- [Part 2: end-to-end workloads](#part-2-end-to-end-workloads)
+  - [Running a workload](#running-a-workload)
+  - [Data engineering](#data-engineering)
+  - [WAP](#wap)
+  - [Fixtures](#fixtures)
+  - [What is measured](#what-is-measured)
+  - [Status](#status)
 
 ## Overview
 
 The repository is a small Typer CLI. A backend-agnostic engine runs an operation N times (serial or across worker threads, with optional jitter) and times only the operation itself. Each backend supplies a thin wrapper that knows how to open a client and how to create and delete a branch; everything else (orchestration, timing, output) is shared. A second (optional) command generates the TPC-H dataset with different scale factors, used as the common input.
+
+Part 2 keeps that shape and widens it. A workload is data — a fixture, a DAG of targets, and a SQL check per target — and every backend implements the same operations behind one protocol, so the loop and the workload definitions are each written once.
 
 ## Setup
 
@@ -86,7 +100,11 @@ uv run main.py data tpch --sf 1
 
 This writes one parquet per table to `data/tpch_sf1/` (as a check, for SF1, `lineitem` has 6,001,215 rows). Upload those files to object storage and load them into Bauplan, Snowflake and Databricks.
 
-## Running a benchmark
+These same 8 tables are all part 2 needs as well. Everything else it works on is derived from them inside the warehouse at the start of a run, so there is nothing extra to generate or upload.
+
+## Part 1: branching primitives
+
+### Running a benchmark
 
 ```
 uv run main.py bench bauplan <BRANCH>
@@ -98,7 +116,7 @@ The first argument is the backend and the second is what to branch from: a ref f
 
 `--verify-clone` checks, after each branch is created and before it is deleted, that every source table is present in the new branch, and aborts the run if any is missing. The check runs outside the timed region, so it does not affect the measurements.
 
-## Branching across backends
+### Branching across backends
 
 The three platforms expose different primitives, and the benchmark maps each to a create and a delete operation that are timed separately.
 
@@ -108,7 +126,7 @@ Snowflake has no branches; its analog is a zero-copy database clone. Create is `
 
 Databricks only offers a per-table shallow clone, with no database or schema level clone. A branch is therefore a new schema into which every table of the source schema is shallow-cloned, and delete is `DROP SCHEMA ... CASCADE`. Notice that Databricks does _not_ allow the `--chained` flag.
 
-## Results
+### Results
 
 Speedup is based on atomic create p95, relative to Bauplan within the same execution mode. Testing was carried out from the same region as each provider: `us-east-1` for Bauplan and Snowflake, `us-west-2` for Databricks.
 
@@ -140,3 +158,86 @@ Speedup is based on atomic create p95, relative to Bauplan within the same execu
 | databricks | N/A | N/A | N/A |
 
 Databricks is `N/A` for chained because it does not allow for chained shallow copies.
+
+## Part 2: end-to-end workloads
+
+Part 1 times a branch on its own. Part 2 puts branching inside the work it normally accompanies: a mock agent trying to get something right, branching before each attempt, checking the result, and throwing the branch away when the attempt was wrong.
+
+Every workload runs the same loop:
+
+```
+create root branch off the base ref     (untimed)
+build the workload's fixture on it      (untimed)
+  ↓
+repeat until the work is done, or the step budget runs out:
+    branch off a committed branch
+    attempt one target on it
+    check every target built so far
+    if every check passed, keep the branch: merge it back, or leave it for others to build on
+    otherwise delete it and try again from the last good state
+  ↓
+delete every branch the run created     (untimed)
+```
+
+A step is accepted only when every check on it passed, which is the same rule for all workloads. Because only accepted steps are kept, the tree a run builds is made of successful work, and its shape is set by three numbers: how many branches come off the root, how many off each branch after that, and how deep it may go. A chain is a fanout of one at every level; a star is a depth of one. Any number of workers can attempt steps at once.
+
+### Running a workload
+
+Each workload is a subcommand, carrying the shape and concurrency it is normally run at:
+
+```
+uv run main.py macrobench data-engineering bauplan <REF>
+uv run main.py macrobench wap bauplan <REF>
+```
+
+The first argument is the backend and the second is what the root branch is cut from. Every setting is also an option — `--seed`, `--p-correct`, `--root-fanout`, `--inner-fanout`, `--max-depth`, `--max-steps`, `--n-workers`, `--merge-on-commit`, `--namespace`, `--cache` and `--results-path`; see `uv run main.py macrobench <workload> --help`.
+
+`--seed` makes a single-worker run reproducible: it drives both which target the agent attempts and whether that attempt is a correct one, so the same seed replays the same successes and dead ends. `--p-correct` is the chance any one attempt is correct, so lowering it means more dead ends and a longer walk to the same finished state. With several workers, thread timing decides which branch gets extended when, so runs stop being exactly reproducible.
+
+`--cache` is off by default and always passed explicitly rather than left for the platform to resolve, since these workloads rebuild identical artifacts constantly and a warm cache would time a lookup instead of the work.
+
+### Data engineering
+
+A chain, one worker. Three regional feeds of the same orders disagree with each other the way real multi-source feeds do — one reports price before discount, one after and with an extra tax column, one uses raw column names and repeats about 1% of its rows. The agent standardizes each feed, unions them into one table tagged by source, and builds a revenue mart by nation and quarter on top:
+
+```
+feed_americas ─→ stg_americas ─┐
+feed_europe   ─→ stg_europe   ─┼─→ orders_unified ─→ revenue_by_nation_quarter
+feed_asia     ─→ stg_asia     ─┘
+```
+
+Each model has a correct and a broken version, and a target passes when it reproduces its gold table exactly. The agent only attempts a target whose inputs already pass, so it walks up the DAG and never builds on a broken parent. Accepted steps stack into a single deep chain, published once at the end.
+
+### WAP
+
+A star, eight workers. Batches of orders arrive; each is appended to the published table on its own branch off the root, audited there, then merged back into the root or deleted. Three audits run on the batch just appended: order keys are unique, no customer key is null, and every customer exists. The broken version of a batch appends its rows twice, which the uniqueness audit catches.
+
+Because the root is shared, this is where merge contention shows up. Bauplan resolves merges per key, so when several workers publish into the same root only the first wins; the losers' branches are anchored to a commit the root has moved past and cannot be merged again no matter how many times they retry. Such a step is redone from scratch off the advanced root instead — re-branch, re-append, re-audit, merge — and the results record how many attempts it took. That redone work is the cost of contention, and it is what this workload mostly measures.
+
+### Fixtures
+
+Whatever a workload starts from is built inside the warehouse during setup, not shipped as parquet and uploaded:
+
+```
+create root branch off main         TPC-H only, untouched
+  ↓
+run the fixture on the root branch  untimed
+  ↓
+step 1 branches off the root and inherits all of it
+```
+
+Setup fails loudly if the fixture does not leave every table it owes. For data engineering the fixture builds the three drifted feeds and the gold tables they are checked against; gold is computed from the untouched TPC-H tables rather than from the feeds, so reproducing it means the drift was genuinely undone rather than a pipeline agreeing with itself. For WAP it builds the stream of batched orders and seeds the table they land in.
+
+### What is measured
+
+Each timed operation appends one row: `create_branch`, `mutate`, `evaluate`, `delete_branch` and `merge_branch`, plus one `<workload>_workload` row covering the whole timed region so a run's end-to-end cost is queryable without re-adding the parts and the gaps between them.
+
+Everything around the loop is deliberately outside it — opening clients, cutting the root branch, building the fixture, and the teardown that deletes the run's branches afterwards. Branch names are built outside the measured region too, the same way part 1 does it.
+
+Rows land in `results/macrobench.parquet` by default, carrying `backend`, `workload`, `exp_id`, `step`, `operation`, `target`, `branch_name`, `duration_s`, `started_at`, `ended_at`, `parent`, `depth`, `accepted`, `correct`, `params`, `failed_checks`, `attempts`, `committed`, `steps`, and the run's full `config` as a struct. Merge rows also carry `merge_attempt`, the try they belonged to. As in part 1, results are appended with `how="diagonal_relaxed"`, so adding a field does not break older files.
+
+### Status
+
+Implemented: the data engineering and WAP workloads, on Bauplan. Running either against `snowflake` or `databricks` raises `NotImplementedError` rather than pretending.
+
+Not yet done: the other two workloads (data science, fixing bad data), the Snowflake and Databricks adapters, and schema evolution as a step — every attempt currently changes values, not shapes. Databricks is expected to fail the chained workload at depth 2, since it does not allow chained shallow clones, which is a result about the platform rather than a hole in the harness. No results are published for part 2 yet.

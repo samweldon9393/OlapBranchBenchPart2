@@ -7,7 +7,7 @@ read it through the Workload interface and know none of it.
 
 import random
 
-from src.macrobench.spec import Action, Fixture, Workload
+from src.macrobench.experiment import Action, Fixture, Workload
 
 # The drifted feeds the agent has to standardize, and the gold tables it is judged against. Gold is
 # computed from the untouched TPC-H tables rather than from the feeds, so reproducing it means the
