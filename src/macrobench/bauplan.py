@@ -101,7 +101,7 @@ def mutate(client: bauplan.Client, branch: str, namespace: str, action: Action, 
             project_dir=str(PROJECTS / action.target),
             ref=branch,
             namespace=namespace,
-            parameters={"variant": action.variant},
+            parameters={"variant": action.variant, **dict(action.params)},
             cache=_cache_mode(cache),
         )
     except bauplan.exceptions.BauplanError:
