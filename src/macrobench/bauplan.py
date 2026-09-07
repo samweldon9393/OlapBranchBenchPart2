@@ -16,6 +16,16 @@ load_dotenv()
 PROJECTS = Path(__file__).parent / "projects"
 
 
+def _cache_mode(cache: bool) -> str:
+    """Bauplan's on/off spelling of the caching flag.
+
+    Passed on every call that takes it. Left unset, the SDK defaults a run to 'on' and resolves a
+    query from the profile, which would make timings depend on what had already been built rather
+    than on the work asked for.
+    """
+    return "on" if cache else "off"
+
+
 def connect() -> bauplan.Client:
     """Open a Bauplan client from the environment."""
     return bauplan.Client(api_key=os.getenv("BAUPLAN_API_KEY"))
@@ -37,7 +47,9 @@ def create_root_branch(client: bauplan.Client, base_branch: str) -> str:
     return root_branch
 
 
-def materialize_fixture(client: bauplan.Client, branch: str, namespace: str, fixture: Fixture) -> None:
+def materialize_fixture(
+    client: bauplan.Client, branch: str, namespace: str, fixture: Fixture, cache: bool = False
+) -> None:
     """Build the workload's fixture on the branch.
 
     This is setup, not measurement: once it has run, the branch holds whatever the workload needs
@@ -45,7 +57,12 @@ def materialize_fixture(client: bauplan.Client, branch: str, namespace: str, fix
     anything. The fixture names the tables it owes, and they are checked here so a fixture that
     half-built fails now rather than as a workload that can never finish.
     """
-    state = client.run(project_dir=str(PROJECTS / fixture.name), ref=branch, namespace=namespace)
+    state = client.run(
+        project_dir=str(PROJECTS / fixture.name),
+        ref=branch,
+        namespace=namespace,
+        cache=_cache_mode(cache),
+    )
     if str(state.job_status).lower() != "success":
         raise RuntimeError(f"fixture run {state.job_id} on {branch} failed: {state.job_status}")
 
@@ -71,7 +88,7 @@ def merge_branch(client: bauplan.Client, source_ref: str, into_branch: str) -> N
     client.merge_branch(source_ref=source_ref, into_branch=into_branch)
 
 
-def mutate(client: bauplan.Client, branch: str, namespace: str, action: Action) -> bool:
+def mutate(client: bauplan.Client, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
     """Apply the action's rewrite on the branch by running the target's project.
 
     A run that fails is not an error the benchmark should stop for: writing something that does not
@@ -85,13 +102,16 @@ def mutate(client: bauplan.Client, branch: str, namespace: str, action: Action) 
             ref=branch,
             namespace=namespace,
             parameters={"variant": action.variant},
+            cache=_cache_mode(cache),
         )
     except bauplan.exceptions.BauplanError:
         return False
     return str(state.job_status).lower() == "success"
 
 
-def evaluate(client: bauplan.Client, branch: str, namespace: str, checks: Mapping[str, str]) -> frozenset[str]:
+def evaluate(
+    client: bauplan.Client, branch: str, namespace: str, checks: Mapping[str, str], cache: bool = False
+) -> frozenset[str]:
     """Run each target's check on the branch and return the ones that pass.
 
     The workload supplies the SQL and this only reads the boolean it returns, so what counts as
@@ -102,8 +122,9 @@ def evaluate(client: bauplan.Client, branch: str, namespace: str, checks: Mappin
     passing = set()
     for target, sql in checks.items():
         try:
-            result = client.query(sql, ref=branch, namespace=namespace).to_pylist()[0]
-        except bauplan.exceptions.BauplanError:
+            result = client.query(sql, ref=branch, namespace=namespace, cache=_cache_mode(cache)).to_pylist()[0]
+        except bauplan.exceptions.BauplanError as e:
+            print(f"check for {target} on {branch} failed: {e}")
             continue
         if result["ok"]:
             passing.add(target)

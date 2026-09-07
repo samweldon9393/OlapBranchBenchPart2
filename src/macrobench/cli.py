@@ -16,10 +16,15 @@ def macrobenchmark(
     max_steps: Annotated[int, typer.Option(help="Attempts before the agent gives up")] = 20,
     p_correct: Annotated[float, typer.Option(help="Chance an attempt is a correct rewrite")] = 0.7,
     namespace: Annotated[str, typer.Option(help="Namespace holding the workload's tables")] = "tpch_1",
+    cache: Annotated[
+        bool, typer.Option(help="Let the backend serve repeated work from cache instead of rebuilding")
+    ] = False,
     results_path: Annotated[Path, typer.Option(help="Cumulative results parquet")] = Path("results/macrobench.parquet"),
 ) -> None:
     """Run an end-to-end workload benchmark on the chosen backend"""
-    config = MacrobenchConfig(seed=seed, max_steps=max_steps, p_correct=p_correct, namespace=namespace)
+    config = MacrobenchConfig(
+        seed=seed, max_steps=max_steps, p_correct=p_correct, namespace=namespace, cache=cache
+    )
     # Data engineering is the only workload so far; the other three plug in here as they land
     run_workload(DATA_ENGINEERING, backend, base_branch, config, results_path)
     typer.echo(f"results appended to {results_path}")

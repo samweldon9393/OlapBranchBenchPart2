@@ -56,16 +56,16 @@ class Workload:
     checks: Mapping[str, str]
 
 
-def choose_action(workload: Workload, rng: random.Random, matching: frozenset[str], built: frozenset[str], p_correct: float) -> Action | None:
+def choose_action(workload: Workload, rng: random.Random, passing: frozenset[str], p_correct: float) -> Action | None:
     """Pick the next rewrite to attempt, or None when nothing is currently attemptable.
 
-    The agent only reaches for targets whose inputs already exist and that are not already known
-    good, which is what keeps a run walking up the DAG instead of thrashing. Whether it gets the
-    rewrite right is a coin flip weighted by p_correct, so a lower value means more dead ends and a
-    longer walk to the same finished state.
+    A target is attemptable when it is not already good and everything it reads is, so the agent
+    walks up the DAG instead of thrashing and never builds on top of a broken parent. Whether it
+    gets the rewrite right is a coin flip weighted by p_correct, so a lower value means more dead
+    ends and a longer walk to the same finished state.
     """
     attemptable = [
-        target for target in workload.targets if target not in matching and workload.dependencies[target] <= built
+        target for target in workload.targets if target not in passing and workload.dependencies[target] <= passing
     ]
     if not attemptable:
         return None
