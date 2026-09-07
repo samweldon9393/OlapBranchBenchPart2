@@ -1,12 +1,12 @@
-"""What a workload is, in terms the backends and the loop can both work with.
+"""What a workload is, in terms the backends and the driver can both work with.
 
-The four workloads differ in what they set up, what they build, and how they know they are done,
-but they all run the same branch/mutate/evaluate/prune loop. Everything that differs is data in a
-Workload, so the loop and the backend adapters stay written once.
+The workloads differ in what they set up, what they build, how they choose what to try next, and
+how they know a step was good. All of that is data in a Workload, so the driver and the backend
+adapters stay written once.
 """
 
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 
@@ -25,14 +25,18 @@ class Fixture:
 
 @dataclass(frozen=True)
 class Action:
-    """One rewrite the agent can attempt: a target to build, and which version of it to write.
+    """One attempt the agent can make: a target to build, which version of it, and any parameters.
 
-    How a backend turns this into work is its own business; all the loop needs to know is what the
-    attempt was aimed at and whether it was meant to be a good one.
+    How a backend turns this into work is its own business; all the driver needs to know is what
+    the attempt was aimed at and whether it was meant to be a good one. `params` is a tuple of
+    pairs rather than a dict so the dataclass stays hashable; it names the thing the attempt works
+    on — the batch a WAP step loads, say — and is passed to the backend and interpolated into the
+    workload's check SQL.
     """
 
     target: str
     correct: bool
+    params: tuple[tuple[str, str], ...] = ()
 
     @property
     def variant(self) -> str:
@@ -40,33 +44,27 @@ class Action:
         return "correct" if self.correct else "broken"
 
 
+# Picking the next attempt is the one thing that genuinely differs per workload, so it is a
+# callable on the Workload rather than a hook system. `parent_state` is the set of targets already
+# built and passing on the branch being extended, and `step` is the run-wide step counter. Return
+# None when there is nothing to attempt from this parent.
+type ChooseAction = Callable[["Workload", random.Random, frozenset[str], int, float], "Action | None"]
+
+
 @dataclass(frozen=True)
 class Workload:
     """A workload the benchmark can run end to end.
 
-    `checks` maps each target to SQL returning a single row with one boolean `ok` column; a backend
-    runs it and reads that column, so deciding what "correct" means stays with the workload and
-    never leaks into the backend adapters.
+    `checks` is two levels: each target maps to the checks that judge it, by name. Data engineering
+    has one check per target, keyed by the target's own name; WAP runs three audits over its single
+    target. Each check is SQL returning a single row with one boolean `ok` column, and may contain
+    `{name}` placeholders that the driver fills from the action's params. A step is accepted when
+    every check run on it passes, which is the same rule for every workload.
     """
 
     name: str
     fixture: Fixture
     targets: tuple[str, ...]
     dependencies: Mapping[str, frozenset[str]]
-    checks: Mapping[str, str]
-
-
-def choose_action(workload: Workload, rng: random.Random, passing: frozenset[str], p_correct: float) -> Action | None:
-    """Pick the next rewrite to attempt, or None when nothing is currently attemptable.
-
-    A target is attemptable when it is not already good and everything it reads is, so the agent
-    walks up the DAG instead of thrashing and never builds on top of a broken parent. Whether it
-    gets the rewrite right is a coin flip weighted by p_correct, so a lower value means more dead
-    ends and a longer walk to the same finished state.
-    """
-    attemptable = [
-        target for target in workload.targets if target not in passing and workload.dependencies[target] <= passing
-    ]
-    if not attemptable:
-        return None
-    return Action(target=rng.choice(attemptable), correct=rng.random() < p_correct)
+    checks: Mapping[str, Mapping[str, str]]
+    choose_action: ChooseAction
