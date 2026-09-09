@@ -9,7 +9,7 @@ import random
 
 from src.macrobench.experiment import Action, Fixture, Workload
 
-# Batch ids the fixture splits orders into; see projects/wap_fixture/orders_batched.sql
+# Batch ids the fixture splits orders into; see projects/wap_projects/wap_fixture/orders_batched.sql
 N_BATCHES = 61
 
 

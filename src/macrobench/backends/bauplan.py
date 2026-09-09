@@ -12,8 +12,23 @@ from src.macrobench.experiment import Action, Fixture
 load_dotenv()
 
 # Bauplan does the work of a step by running a project, so every fixture and every target this
-# backend can build has a project here, named after it
-PROJECTS = Path(__file__).parents[1] / "workloads" / "projects"
+# backend can build has a project named after it, grouped under the workload it belongs to. Project
+# names are unique across those groups, so one index over all of them is enough to find any project
+# without the backend having to be told which workload is running.
+PROJECTS_ROOT = Path(__file__).parents[1] / "workloads" / "projects"
+PROJECTS = {
+    project.name: project
+    for project in PROJECTS_ROOT.glob("*/*")
+    if (project / "bauplan_project.yaml").exists()
+}
+
+
+def _project(name: str) -> Path:
+    """The Bauplan project that builds a named fixture or target."""
+    try:
+        return PROJECTS[name]
+    except KeyError:
+        raise RuntimeError(f"no bauplan project named {name} under {PROJECTS_ROOT}") from None
 
 
 def _cache_mode(cache: bool) -> str:
@@ -58,7 +73,7 @@ def materialize_fixture(
     half-built fails now rather than as a workload that can never finish.
     """
     state = client.run(
-        project_dir=str(PROJECTS / fixture.name),
+        project_dir=str(_project(fixture.name)),
         ref=branch,
         namespace=namespace,
         cache=_cache_mode(cache),
@@ -98,7 +113,7 @@ def run(client: bauplan.Client, branch: str, namespace: str, action: Action, cac
     """
     try:
         state = client.run(
-            project_dir=str(PROJECTS / action.target),
+            project_dir=str(_project(action.target)),
             ref=branch,
             namespace=namespace,
             parameters={"variant": action.variant, **dict(action.params)},
