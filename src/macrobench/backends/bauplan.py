@@ -88,7 +88,7 @@ def merge_branch(client: bauplan.Client, source_ref: str, into_branch: str) -> N
     client.merge_branch(source_ref=source_ref, into_branch=into_branch)
 
 
-def mutate(client: bauplan.Client, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
+def run(client: bauplan.Client, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
     """Apply the action's rewrite on the branch by running the target's project.
 
     A run that fails is not an error the benchmark should stop for: writing something that does not
