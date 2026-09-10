@@ -1,0 +1,7 @@
+project:
+  id: 99b8a586-6c5a-48ab-9dae-8d6873567ba4
+  name: macrobench_landed_customer
+
+parameters:
+  variant:
+    default: correct

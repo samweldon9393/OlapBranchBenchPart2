@@ -1,0 +1,7 @@
+project:
+  id: 6b5525af-df97-49ea-9f7e-047a3f3e68dd
+  name: macrobench_landed_orders
+
+parameters:
+  variant:
+    default: correct

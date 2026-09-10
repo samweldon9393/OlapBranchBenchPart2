@@ -1,0 +1,7 @@
+project:
+  id: d0aa9bd4-c1f0-4cc4-9b77-f903ab51615b
+  name: macrobench_landed_part
+
+parameters:
+  variant:
+    default: correct

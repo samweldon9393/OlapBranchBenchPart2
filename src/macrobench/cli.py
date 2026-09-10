@@ -15,11 +15,16 @@ from src.branch.cli import Backend
 from src.macrobench.driver import run_workload
 from src.macrobench.experiment import MacrobenchConfig, Workload
 from src.macrobench.workloads.data_engineering import WORKLOAD as DATA_ENGINEERING
+from src.macrobench.workloads.wap import TABLES as WAP_TABLES
 from src.macrobench.workloads.wap import WORKLOAD as WAP
 
 app = typer.Typer(help="End-to-end workload benchmarks")
 
 RESULTS_PATH = Path("results/macrobench.parquet")
+
+# WAP hands each table out once, so the table count is its fanout, its step budget and the most
+# workers that can be busy at a time
+WAP_STEPS = len(WAP_TABLES)
 
 BackendArg = Annotated[Backend, typer.Argument(help="Backend to benchmark")]
 BaseBranchArg = Annotated[str, typer.Argument(help="Ref / database / catalog.schema to branch from")]
@@ -89,19 +94,22 @@ def wap(
     namespace: Namespace = "tpch_1",
     cache: Cache = False,
     p_correct: PCorrect = 0.7,
-    root_fanout: RootFanout = 8,
+    root_fanout: RootFanout = WAP_STEPS,
     inner_fanout: InnerFanout = 0,
     max_depth: MaxDepth = 1,
-    max_steps: MaxSteps = 32,
-    n_workers: NWorkers = 8,
+    max_steps: MaxSteps = WAP_STEPS,
+    n_workers: NWorkers = WAP_STEPS,
     merge_on_commit: MergeOnCommit = True,
     results_path: ResultsPath = RESULTS_PATH,
 ) -> None:
-    """Append batches of orders, audit each on its own branch, and publish the ones that pass.
+    """Ingest each TPC-H table on its own branch, audit what landed, and publish it.
 
-    A star by default: every batch branches straight off the root and merges back into it, so the
-    root fanout is how many batches may be in flight at once and matches the worker count.
+    A star: every table branches straight off the root and merges back into it. There are eight
+    tables and each is handed out once, so eight is both the default and the most workers that can
+    be busy at a time.
     """
+    if n_workers > WAP_STEPS:
+        raise typer.BadParameter(f"at most {WAP_STEPS} workers, one per table", param_hint="--n-workers")
     config = MacrobenchConfig(
         seed=seed,
         namespace=namespace,

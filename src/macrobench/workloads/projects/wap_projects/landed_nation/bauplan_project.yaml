@@ -1,0 +1,7 @@
+project:
+  id: 7268abf7-ad95-44d3-8101-622733b4ad2a
+  name: macrobench_landed_nation
+
+parameters:
+  variant:
+    default: correct
