@@ -204,17 +204,21 @@ def run_workload(
     client = ops.connect()
     root_branch = ops.create_root_branch(client, base_branch)
     _note("setup", f"root branch {root_branch} off {base_branch}")
-    _note("setup", f"building fixture {workload.fixture.name}")
-    ops.materialize_fixture(client, root_branch, config.namespace, workload.fixture, config.cache)
-    _note("setup", f"fixture ready with {len(workload.fixture.tables)} tables")
 
+    # The tree is built before the fixture so that the root branch is already something teardown
+    # knows to clean up. Building a fixture is the most failure-prone part of a run, and on a
+    # backend where a branch is a real database, an orphaned root is a bill rather than a stray ref.
     tree = Tree(Node(root_branch, None, 0, frozenset()), workload, config, random.Random(config.seed))
     rows: list[dict] = []
 
-    # ---- timed region ----
-    workload_started_at = datetime.now(tz=UTC)
-    workload_perf_start = time.perf_counter()
     try:
+        _note("setup", f"building fixture {workload.fixture.name}")
+        ops.materialize_fixture(client, root_branch, config.namespace, workload.fixture, config.cache)
+        _note("setup", f"fixture ready with {len(workload.fixture.tables)} tables")
+
+        # ---- timed region ----
+        workload_started_at = datetime.now(tz=UTC)
+        workload_perf_start = time.perf_counter()
         with ThreadPoolExecutor(max_workers=config.n_workers) as pool:
             per_worker = list(pool.map(lambda _: _worker(tree, ops, workload, config), range(config.n_workers)))
         rows = [row for worker_rows in per_worker for row in worker_rows]
