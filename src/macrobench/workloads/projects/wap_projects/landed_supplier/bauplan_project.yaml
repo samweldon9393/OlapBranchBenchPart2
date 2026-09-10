@@ -1,0 +1,7 @@
+project:
+  id: 4fd310d4-c9f5-4670-ae63-9ed95d8d0801
+  name: macrobench_landed_supplier
+
+parameters:
+  variant:
+    default: correct

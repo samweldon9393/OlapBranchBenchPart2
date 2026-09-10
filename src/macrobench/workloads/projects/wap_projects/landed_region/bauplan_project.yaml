@@ -1,0 +1,7 @@
+project:
+  id: 8373695b-9f8a-455e-a32a-545c8c1c9765
+  name: macrobench_landed_region
+
+parameters:
+  variant:
+    default: correct

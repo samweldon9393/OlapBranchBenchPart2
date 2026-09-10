@@ -1,0 +1,7 @@
+project:
+  id: 53220c2c-352a-415a-9459-9fc17915e634
+  name: macrobench_landed_partsupp
+
+parameters:
+  variant:
+    default: correct

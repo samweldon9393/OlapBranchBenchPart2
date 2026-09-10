@@ -1,0 +1,7 @@
+project:
+  id: 25b44352-a2c7-4e43-9305-d7d8be8708c1
+  name: macrobench_landed_lineitem
+
+parameters:
+  variant:
+    default: correct

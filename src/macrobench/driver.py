@@ -100,11 +100,11 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
             tree.opened(branch)
 
             row, _ = timed(
-                "mutate",
+                "run",
                 step,
                 action.target,
                 branch,
-                partial(ops.mutate, client, branch, config.namespace, action, config.cache),
+                partial(ops.run, client, branch, config.namespace, action, config.cache),
             )
             step_rows.append(row)
 
@@ -186,7 +186,7 @@ def run_workload(
     config: MacrobenchConfig,
     results_path: str | Path = "results/macrobench.parquet",
 ) -> pl.DataFrame:
-    """Run one workload end to end: branch, mutate, evaluate, keep or prune.
+    """Run one workload end to end: branch, run, evaluate, keep or prune.
 
     Each step branches off a committed node, attempts one target on it, and checks the result. A
     step whose every check passes is committed — merged into its parent right away, or kept as a
@@ -239,7 +239,7 @@ def run_workload(
 
         workload_duration_s = time.perf_counter() - workload_perf_start
         workload_ended_at = datetime.now(tz=UTC)
-        retries = sum(1 for row in rows if row["operation"] == "mutate") - tree.step
+        retries = sum(1 for row in rows if row["operation"] == "run") - tree.step
         _note(
             "done",
             f"{tree.step} steps, {len(tree.nodes) - 1} kept, {retries} redone "
