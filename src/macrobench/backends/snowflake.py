@@ -19,18 +19,22 @@ from src.branch.snowflake import connect as open_connection
 from src.branch.sql import Connection, Cursor, ident
 from src.macrobench.experiment import Action, Fixture
 
-# The SQL a fixture or a target is built by, named after it. A fixture is `<name>.sql`; a target has
-# one script per variant, `<name>.correct.sql` and `<name>.broken.sql`, mirroring the way a Bauplan
-# project takes the variant as a run parameter.
+# The SQL a fixture or a target is built by, named after it and grouped under the workload it
+# belongs to. A fixture is `<name>.sql`; a target has one script per variant, `<name>.correct.sql`
+# and `<name>.broken.sql`, mirroring the way a Bauplan project takes the variant as a run parameter.
+# Script names are unique across the groups, so one index over all of them is enough to find any
+# script without the backend having to be told which workload is running.
 SQL_ROOT = Path(__file__).parents[1] / "workloads" / "sql"
+SCRIPTS = {script.name: script for script in SQL_ROOT.glob("*/*.sql")}
 
 
 def _script(name: str, variant: str | None = None) -> Path:
     """The SQL script that builds a named fixture or target."""
-    script = SQL_ROOT / (f"{name}.{variant}.sql" if variant else f"{name}.sql")
-    if not script.exists():
-        raise RuntimeError(f"no snowflake sql at {script}; this workload has no Snowflake script for {name} yet")
-    return script
+    filename = f"{name}.{variant}.sql" if variant else f"{name}.sql"
+    try:
+        return SCRIPTS[filename]
+    except KeyError:
+        raise RuntimeError(f"no snowflake script {filename} under {SQL_ROOT}") from None
 
 
 def _statements(script: Path, params: Mapping[str, str]) -> list[str]:
