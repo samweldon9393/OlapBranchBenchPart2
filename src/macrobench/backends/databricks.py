@@ -76,6 +76,15 @@ def _clone_tables(cursor: Cursor, source: str, destination: str, deep: bool) -> 
         )
 
 
+def close(client: Connection) -> None:
+    """Close the warehouse connection.
+
+    A run opens one per worker; left to the garbage collector they are still being closed as the
+    interpreter shuts down, by which point the connector's transport can already be gone.
+    """
+    client.close()
+
+
 def create_root_branch(client: Connection, base_branch: str) -> str:
     """Deep clone the base schema into the run's root and return its catalog.schema.
 

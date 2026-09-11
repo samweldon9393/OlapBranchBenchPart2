@@ -37,6 +37,11 @@ class MacroBackend(Protocol):
         """Open a client."""
         ...
 
+    def close(self, client: object) -> None:
+        """Release a client. A run opens one per worker, so leaving them to the garbage collector
+        means connections are still being torn down as the interpreter exits."""
+        ...
+
     def create_root_branch(self, client: object, base_branch: str) -> str:
         """Create the root branch off the base ref and return its name."""
         ...
