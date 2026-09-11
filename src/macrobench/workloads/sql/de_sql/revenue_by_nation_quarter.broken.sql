@@ -2,8 +2,8 @@
 CREATE OR REPLACE TABLE revenue_by_nation_quarter AS
 SELECT n.n_name AS nation_name,
        DATE_TRUNC('year', u.order_date) AS order_quarter,
-       CAST(SUM(u.net_price) AS NUMBER(38, 2)) AS net_revenue,
-       CAST(SUM(u.tax_amount) AS NUMBER(38, 2)) AS tax_amount,
+       CAST(SUM(u.net_price) AS DECIMAL(38, 2)) AS net_revenue,
+       CAST(SUM(u.tax_amount) AS DECIMAL(38, 2)) AS tax_amount,
        COUNT(*) AS order_count
 FROM orders_unified u
 JOIN customer c ON c.c_custkey = u.cust_key

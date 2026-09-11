@@ -17,6 +17,7 @@ from typing import Protocol
 
 from src.branch.cli import Backend
 from src.macrobench.backends import bauplan as bauplan_backend
+from src.macrobench.backends import databricks as databricks_backend
 from src.macrobench.backends import snowflake as snowflake_backend
 from src.macrobench.experiment import Action, Fixture
 
@@ -34,6 +35,11 @@ class MacroBackend(Protocol):
 
     def connect(self) -> object:
         """Open a client."""
+        ...
+
+    def close(self, client: object) -> None:
+        """Release a client. A run opens one per worker, so leaving them to the garbage collector
+        means connections are still being torn down as the interpreter exits."""
         ...
 
     def create_root_branch(self, client: object, base_branch: str) -> str:
@@ -72,6 +78,7 @@ class MacroBackend(Protocol):
 BACKENDS: dict[Backend, MacroBackend] = {
     Backend.bauplan: bauplan_backend,
     Backend.snowflake: snowflake_backend,
+    Backend.databricks: databricks_backend,
 }
 
 

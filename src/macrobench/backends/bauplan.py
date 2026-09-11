@@ -49,6 +49,10 @@ def connect() -> bauplan.Client:
     return bauplan.Client(api_key=os.getenv("BAUPLAN_API_KEY"))
 
 
+def close(client: bauplan.Client) -> None:
+    """Nothing to release: the Bauplan client holds no connection of its own."""
+
+
 def create_root_branch(client: bauplan.Client, base_branch: str) -> str:
     """Create the root branch off the base ref and return its name.
 

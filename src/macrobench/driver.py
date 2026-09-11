@@ -66,6 +66,21 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
     client = ops.connect()
     rows: list[dict] = []
 
+    try:
+        rows = _steps(tree, ops, workload, config, client)
+    finally:
+        # A worker's client outlives every step it runs but nothing beyond that; left open, it is
+        # still being torn down as the interpreter exits
+        ops.close(client)
+    return rows
+
+
+def _steps(
+    tree: Tree, ops: MacroBackend, workload: Workload, config: MacrobenchConfig, client: object
+) -> list[dict]:
+    """Claim and run steps until the tree says the run is done."""
+    rows: list[dict] = []
+
     while (claim := tree.claim()) is not None:
         parent, action, step = claim
         params = dict(action.params)
@@ -275,6 +290,7 @@ def run_workload(
                 ops.delete_branch(client, branch)
             except Exception as error:  # noqa: BLE001 - the backend's exception types are its own
                 _note("teardown", f"could not delete {branch}: {error}")
+        ops.close(client)
 
     committed = len(tree.nodes) - 1
     config_struct = asdict(config)
