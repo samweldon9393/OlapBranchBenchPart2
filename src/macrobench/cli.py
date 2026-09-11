@@ -12,6 +12,7 @@ from typing import Annotated
 import typer
 
 from src.branch.cli import Backend
+from src.macrobench.backends.protocol import resolve
 from src.macrobench.driver import run_workload
 from src.macrobench.experiment import MacrobenchConfig, Workload
 from src.macrobench.workloads.data_engineering import WORKLOAD as DATA_ENGINEERING
@@ -29,7 +30,10 @@ WAP_STEPS = len(WAP_TABLES)
 BackendArg = Annotated[Backend, typer.Argument(help="Backend to benchmark")]
 BaseBranchArg = Annotated[str, typer.Argument(help="Ref / database / catalog.schema to branch from")]
 Seed = Annotated[int, typer.Option(help="Seed for the agent's choices, for reproducible runs")]
-Namespace = Annotated[str, typer.Option(help="Namespace holding the workload's tables")]
+Namespace = Annotated[
+    str | None,
+    typer.Option(help="Namespace holding the workload's tables; defaults to the backend's own"),
+]
 Cache = Annotated[bool, typer.Option(help="Let the backend serve repeated work from cache instead of rebuilding")]
 PCorrect = Annotated[float, typer.Option(help="Chance an attempt is a correct rewrite")]
 RootFanout = Annotated[int, typer.Option(help="Branches taken off the root")]
@@ -55,7 +59,7 @@ def data_engineering(
     backend: BackendArg,
     base_branch: BaseBranchArg,
     seed: Seed = 0,
-    namespace: Namespace = "tpch_1",
+    namespace: Namespace = None,
     cache: Cache = False,
     p_correct: PCorrect = 0.7,
     root_fanout: RootFanout = 1,
@@ -73,7 +77,7 @@ def data_engineering(
     """
     config = MacrobenchConfig(
         seed=seed,
-        namespace=namespace,
+        namespace=namespace or resolve(backend).DEFAULT_NAMESPACE,
         cache=cache,
         p_correct=p_correct,
         root_fanout=root_fanout,
@@ -91,7 +95,7 @@ def wap(
     backend: BackendArg,
     base_branch: BaseBranchArg,
     seed: Seed = 0,
-    namespace: Namespace = "tpch_1",
+    namespace: Namespace = None,
     cache: Cache = False,
     p_correct: PCorrect = 0.7,
     root_fanout: RootFanout = WAP_STEPS,
@@ -112,7 +116,7 @@ def wap(
         raise typer.BadParameter(f"at most {WAP_STEPS} workers, one per table", param_hint="--n-workers")
     config = MacrobenchConfig(
         seed=seed,
-        namespace=namespace,
+        namespace=namespace or resolve(backend).DEFAULT_NAMESPACE,
         cache=cache,
         p_correct=p_correct,
         root_fanout=root_fanout,

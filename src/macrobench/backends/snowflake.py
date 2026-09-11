@@ -13,11 +13,16 @@ each target has a script here rather than a project directory.
 
 import uuid
 from collections.abc import Mapping
+from io import StringIO
 from pathlib import Path
 
 from src.branch.snowflake import connect as open_connection
 from src.branch.sql import Connection, Cursor, ident
 from src.macrobench.experiment import Action, Fixture
+
+# The schema the TPC-H tables live in on this backend, used when a run does not name one.
+# Snowflake folds unquoted identifiers to upper case, so this is spelled the way it is stored.
+DEFAULT_NAMESPACE = "TPCH_SF1"
 
 # The SQL a fixture or a target is built by, named after it and grouped under the workload it
 # belongs to. A fixture is `<name>.sql`; a target has one script per variant, `<name>.correct.sql`
@@ -40,14 +45,16 @@ def _script(name: str, variant: str | None = None) -> Path:
 def _statements(script: Path, params: Mapping[str, str]) -> list[str]:
     """The statements in a script, in order.
 
-    Scripts are split on semicolons rather than sent as one string, because a cursor runs one
-    statement at a time. Keeping one statement per line-group and no semicolons inside literals is
-    a constraint on how these scripts are written, not something worth a SQL parser here.
+    Splitting is the connector's own, which knows that a semicolon inside a comment or a string
+    literal does not end a statement. Splitting on semicolons by hand looks like it works right up
+    until a comment contains one, at which point the script quietly becomes two broken fragments.
     """
+    from snowflake.connector.util_text import split_statements
+
     sql = script.read_text()
     if params:
         sql = sql.format(**params)
-    return [statement.strip() for statement in sql.split(";") if statement.strip()]
+    return [statement for statement, _is_put_or_get in split_statements(StringIO(sql)) if statement.strip()]
 
 
 def _use(cursor: Cursor, branch: str, namespace: str) -> None:

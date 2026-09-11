@@ -90,6 +90,9 @@ class MacrobenchConfig:
     The three fanout numbers are the whole topology: a chain is root_fanout=1, inner_fanout=1; a
     star is max_depth=1 with inner_fanout=0; anything bushier is a bigger root_fanout and a
     non-zero inner_fanout.
+
+    The namespace default here is only a fallback for building a config by hand. Each backend keeps
+    the tables somewhere different, so the CLI fills this in from the backend being run against.
     """
 
     seed: int = 0

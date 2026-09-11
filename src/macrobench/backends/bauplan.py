@@ -11,6 +11,9 @@ from src.macrobench.experiment import Action, Fixture
 # Credentials come from .env file
 load_dotenv()
 
+# The namespace the TPC-H tables live in on this backend, used when a run does not name one
+DEFAULT_NAMESPACE = "tpch_1"
+
 # Bauplan does the work of a step by running a project, so every fixture and every target this
 # backend can build has a project named after it, grouped under the workload it belongs to. Project
 # names are unique across those groups, so one index over all of them is enough to find any project

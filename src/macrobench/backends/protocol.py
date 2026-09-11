@@ -28,6 +28,10 @@ class MacroBackend(Protocol):
     as arguments, so the same eight operations serve all four.
     """
 
+    # Where this backend keeps the TPC-H tables. Each spells it differently — a Bauplan namespace, a
+    # Snowflake schema — so a run that does not name one asks the backend rather than assuming.
+    DEFAULT_NAMESPACE: str
+
     def connect(self) -> object:
         """Open a client."""
         ...
