@@ -17,6 +17,7 @@ from typing import Protocol
 
 from src.branch.cli import Backend
 from src.macrobench.backends import bauplan as bauplan_backend
+from src.macrobench.backends import snowflake as snowflake_backend
 from src.macrobench.experiment import Action, Fixture
 
 
@@ -26,6 +27,10 @@ class MacroBackend(Protocol):
     Nothing here knows which workload is running: what to set up and what counts as correct arrive
     as arguments, so the same eight operations serve all four.
     """
+
+    # Where this backend keeps the TPC-H tables. Each spells it differently — a Bauplan namespace, a
+    # Snowflake schema — so a run that does not name one asks the backend rather than assuming.
+    DEFAULT_NAMESPACE: str
 
     def connect(self) -> object:
         """Open a client."""
@@ -66,6 +71,7 @@ class MacroBackend(Protocol):
 
 BACKENDS: dict[Backend, MacroBackend] = {
     Backend.bauplan: bauplan_backend,
+    Backend.snowflake: snowflake_backend,
 }
 
 
