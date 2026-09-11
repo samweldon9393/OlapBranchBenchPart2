@@ -10,12 +10,12 @@
 --
 -- TPC-H has five regions and we want three feeds, so the split is the usual AMER/EMEA/APAC one:
 -- the "europe" feed is really EMEA and also carries AFRICA and MIDDLE EAST.
-CREATE OR REPLACE TRANSIENT TABLE order_facts AS
+CREATE OR REPLACE TABLE order_facts AS
 SELECT
     o.o_orderkey AS order_key,
     o.o_custkey AS cust_key,
     o.o_orderdate AS order_date,
-    TO_VARCHAR(o.o_orderdate, 'YYYY-MM-DD') AS order_date_str,
+    CAST(o.o_orderdate AS STRING) AS order_date_str,
     n.n_name AS nation_name,
     DATE_TRUNC('quarter', o.o_orderdate) AS order_quarter,
     CASE r.r_name
@@ -34,9 +34,9 @@ FROM orders o
 JOIN (
     SELECT
         l_orderkey,
-        CAST(ROUND(SUM(l_extendedprice), 2) AS NUMBER(18, 2)) AS gross_price,
-        CAST(ROUND(SUM(l_extendedprice * (1 - l_discount)), 2) AS NUMBER(18, 2)) AS net_price,
-        CAST(ROUND(SUM(l_extendedprice * (1 - l_discount) * l_tax), 2) AS NUMBER(18, 2)) AS tax_amount
+        CAST(ROUND(SUM(l_extendedprice), 2) AS DECIMAL(18, 2)) AS gross_price,
+        CAST(ROUND(SUM(l_extendedprice * (1 - l_discount)), 2) AS DECIMAL(18, 2)) AS net_price,
+        CAST(ROUND(SUM(l_extendedprice * (1 - l_discount) * l_tax), 2) AS DECIMAL(18, 2)) AS tax_amount
     FROM lineitem
     GROUP BY l_orderkey
 ) la ON la.l_orderkey = o.o_orderkey
@@ -72,8 +72,8 @@ FROM order_facts;
 -- What the revenue mart should hold, computed from the untouched tables rather than from the feeds
 CREATE OR REPLACE TABLE gold_revenue_by_nation_quarter AS
 SELECT nation_name, order_quarter,
-       CAST(SUM(net_price) AS NUMBER(38, 2)) AS net_revenue,
-       CAST(SUM(gold_tax_amount) AS NUMBER(38, 2)) AS tax_amount,
+       CAST(SUM(net_price) AS DECIMAL(38, 2)) AS net_revenue,
+       CAST(SUM(gold_tax_amount) AS DECIMAL(38, 2)) AS tax_amount,
        COUNT(*) AS order_count
 FROM order_facts
 GROUP BY nation_name, order_quarter;

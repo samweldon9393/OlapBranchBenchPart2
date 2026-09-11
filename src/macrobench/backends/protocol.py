@@ -17,6 +17,7 @@ from typing import Protocol
 
 from src.branch.cli import Backend
 from src.macrobench.backends import bauplan as bauplan_backend
+from src.macrobench.backends import databricks as databricks_backend
 from src.macrobench.backends import snowflake as snowflake_backend
 from src.macrobench.experiment import Action, Fixture
 
@@ -72,6 +73,7 @@ class MacroBackend(Protocol):
 BACKENDS: dict[Backend, MacroBackend] = {
     Backend.bauplan: bauplan_backend,
     Backend.snowflake: snowflake_backend,
+    Backend.databricks: databricks_backend,
 }
 
 
