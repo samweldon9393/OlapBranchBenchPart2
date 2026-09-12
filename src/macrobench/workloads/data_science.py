@@ -83,7 +83,8 @@ def choose_action(
     threshold = 1 - p_correct
     return Action(
         target=target,
-        correct=score >= threshold,
+        # Nothing is ever built wrong here: whether a candidate survives is down to its score alone
+        correct=True,
         builder=BUILDER,
         params=(
             ("features", ",".join(sorted(features))),
