@@ -90,7 +90,12 @@ def _comparison_sql(target: str) -> str:
 
 
 def choose_action(
-    workload: Workload, rng: random.Random, parent_state: frozenset[str], step: int, p_correct: float
+    workload: Workload,
+    rng: random.Random,
+    parent_state: frozenset[str],
+    tried: frozenset[str],
+    step: int,
+    p_correct: float,
 ) -> Action | None:
     """Pick the next model to rewrite, or None when nothing is attemptable from this parent.
 

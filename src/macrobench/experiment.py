@@ -39,6 +39,9 @@ class Action:
     target: str
     correct: bool
     params: tuple[tuple[str, str], ...] = ()
+    # What builds the attempt, when that is not a project or script named after the target: a
+    # workload whose every step runs the same builder with different parameters names it here
+    builder: str = ""
 
     @property
     def variant(self) -> str:
@@ -48,9 +51,12 @@ class Action:
 
 # Picking the next attempt is the one thing that genuinely differs per workload, so it is a
 # callable on the Workload rather than a hook system. `parent_state` is the set of targets already
-# built and passing on the branch being extended, and `step` is the run-wide step counter. Return
-# None when there is nothing to attempt from this parent.
-type ChooseAction = Callable[["Workload", random.Random, frozenset[str], int, float], "Action | None"]
+# built and passing on the branch being extended; `tried` is every target already attempted off that
+# same parent, kept or not, so a workload can avoid handing two siblings the same candidate; and
+# `step` is the run-wide step counter. Return None when there is nothing to attempt from this parent.
+type ChooseAction = Callable[
+    ["Workload", random.Random, frozenset[str], frozenset[str], int, float], "Action | None"
+]
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,9 @@ class Workload:
     dependencies: Mapping[str, frozenset[str]]
     checks: Mapping[str, Mapping[str, str]]
     choose_action: ChooseAction
+    # How to pick the branch a run publishes, for a workload whose leaves are not ranked by how much
+    # they built: a (table, column) read off every surviving leaf at once, the highest value winning
+    rank_by: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)

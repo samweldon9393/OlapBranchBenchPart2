@@ -20,7 +20,12 @@ TARGETS = tuple(f"landed_{table}" for table in TABLES)
 
 
 def choose_action(
-    workload: Workload, rng: random.Random, parent_state: frozenset[str], step: int, p_correct: float
+    workload: Workload,
+    rng: random.Random,
+    parent_state: frozenset[str],
+    tried: frozenset[str],
+    step: int,
+    p_correct: float,
 ) -> Action | None:
     """Hand out the next table, or None once every table has been claimed.
 

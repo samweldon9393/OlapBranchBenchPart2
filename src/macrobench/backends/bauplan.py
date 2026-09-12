@@ -1,6 +1,6 @@
 import os
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import bauplan
@@ -120,7 +120,7 @@ def run(client: bauplan.Client, branch: str, namespace: str, action: Action, cac
     """
     try:
         state = client.run(
-            project_dir=str(_project(action.target)),
+            project_dir=str(_project(action.builder or action.target)),
             ref=branch,
             namespace=namespace,
             parameters={"variant": action.variant, **dict(action.params)},
@@ -151,3 +151,18 @@ def evaluate(
         if result["ok"]:
             passing.add(target)
     return frozenset(passing)
+
+
+def read_across(
+    client: bauplan.Client, branches: Sequence[str], namespace: str, table: str, cache: bool = False
+) -> dict[str, list[dict]]:
+    """Read one table off many branches, one query per branch.
+
+    A Bauplan query is scoped to a single ref, so there is no statement that spans branches: reading
+    N of them costs N round trips, which is exactly what this operation exists to measure.
+    """
+    return {
+        branch: client.query(f"SELECT * FROM {table}", ref=branch, namespace=namespace, cache=_cache_mode(cache))
+        .to_pylist()
+        for branch in branches
+    }

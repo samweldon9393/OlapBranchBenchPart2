@@ -246,7 +246,26 @@ def run_workload(
         # path. For a chain that is just the head, the single deepest branch. Ties (two paths that
         # got equally far) are broken arbitrarily, which only arises once a run is bushy.
         if not config.merge_on_commit and (leaves := tree.leaves()):
-            best = max(leaves, key=lambda node: len(node.state))
+            if workload.rank_by is None:
+                best = max(leaves, key=lambda node: len(node.state))
+            else:
+                # Every surviving leaf is scored off a table it wrote, read across all of them at
+                # once. That read is timed like any other operation: how a backend reaches many
+                # branches in one go is part of what a bushy workload measures.
+                table, column = workload.rank_by
+                row, readings = timed(
+                    "aggregate",
+                    -1,
+                    "",
+                    root_branch,
+                    partial(ops.read_across, client, [leaf.branch for leaf in leaves], config.namespace, table,
+                            config.cache),
+                )
+                rows.append(row)
+                best = max(
+                    leaves,
+                    key=lambda node: max((r[column] for r in readings.get(node.branch, [])), default=float("-inf")),
+                )
             row, _ = timed(
                 "merge_branch",
                 -1,

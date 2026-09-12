@@ -12,7 +12,7 @@ each target has a script here rather than a project directory.
 """
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from io import StringIO
 from pathlib import Path
 
@@ -195,7 +195,8 @@ def run(client: Connection, branch: str, namespace: str, action: Action, cache: 
         cursor = client.cursor()
         _set_cache(cursor, cache)
         _use(cursor, branch, namespace)
-        for statement in _statements(_script(action.target, action.variant), dict(action.params)):
+        script = _script(action.builder) if action.builder else _script(action.target, action.variant)
+        for statement in _statements(script, dict(action.params)):
             cursor.execute(statement)
     except SnowflakeError:
         return False
@@ -229,3 +230,29 @@ def evaluate(
         if row is not None and row[0]:
             passing.add(target)
     return frozenset(passing)
+
+
+def read_across(
+    client: Connection, branches: Sequence[str], namespace: str, table: str, cache: bool = False
+) -> dict[str, list[dict]]:
+    """Read one table off many branches in a single statement.
+
+    Each branch is a database, so their copies of a table can be unioned directly. Snowflake reports
+    column names in upper case; they are folded to match what the other backends return.
+    """
+    readings: dict[str, list[dict]] = {branch: [] for branch in branches}
+    if not branches:
+        return readings
+    cursor = client.cursor()
+    _set_cache(cursor, cache)
+    cursor.execute(
+        " UNION ALL ".join(
+            f"SELECT '{ident(branch)}' AS branch_name__, * FROM {ident(branch)}.{ident(namespace)}.{ident(table)}"
+            for branch in branches
+        )
+    )
+    columns = [str(column[0]).lower() for column in cursor.description]
+    for row in cursor.fetchall():
+        record = dict(zip(columns, row, strict=True))
+        readings[record.pop("branch_name__")].append(record)
+    return readings
