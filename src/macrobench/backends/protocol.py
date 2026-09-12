@@ -12,7 +12,7 @@ The client is deliberately opaque: the workload only ever receives one and hands
 it actually is stays the backend's business.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from src.branch.cli import Backend
@@ -72,6 +72,16 @@ class MacroBackend(Protocol):
         self, client: object, branch: str, namespace: str, checks: Mapping[str, str], cache: bool = False
     ) -> frozenset[str]:
         """Run each target's check SQL on the branch and return the targets whose `ok` came back true."""
+        ...
+
+    def read_across(
+        self, client: object, branches: Sequence[str], namespace: str, table: str, cache: bool = False
+    ) -> dict[str, list[dict]]:
+        """Read one table off many branches at once, keyed by branch.
+
+        How many round trips that takes is each backend's own business, and is the point of timing
+        it: where a branch is a database or a schema they can be unioned in one statement, whereas a
+        query scoped to a single ref has to visit every branch in turn."""
         ...
 
 

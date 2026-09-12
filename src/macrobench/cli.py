@@ -16,6 +16,7 @@ from src.macrobench.backends.protocol import resolve
 from src.macrobench.driver import run_workload
 from src.macrobench.experiment import MacrobenchConfig, Workload
 from src.macrobench.workloads.data_engineering import WORKLOAD as DATA_ENGINEERING
+from src.macrobench.workloads.data_science import WORKLOAD as DATA_SCIENCE
 from src.macrobench.workloads.wap import TABLES as WAP_TABLES
 from src.macrobench.workloads.wap import WORKLOAD as WAP
 
@@ -26,6 +27,10 @@ RESULTS_PATH = Path("results/macrobench.parquet")
 # WAP hands each table out once, so the table count is its fanout, its step budget and the most
 # workers that can be busy at a time
 WAP_STEPS = len(WAP_TABLES)
+
+# Every node of the complete data science tree: 8 off the root, 3 off each of those, then the 2
+# features a depth-2 lineage has left. The tree ends when candidates run out, well before this.
+DS_STEPS = 8 + 8 * 3 + 8 * 3 * 2
 
 BackendArg = Annotated[Backend, typer.Argument(help="Backend to benchmark")]
 BaseBranchArg = Annotated[str, typer.Argument(help="Ref / database / catalog.schema to branch from")]
@@ -127,3 +132,46 @@ def wap(
         merge_on_commit=merge_on_commit,
     )
     _run(WAP, backend, base_branch, config, results_path)
+
+
+@app.command("data-science")
+def data_science(
+    backend: BackendArg,
+    base_branch: BaseBranchArg,
+    seed: Seed = 0,
+    namespace: Namespace = None,
+    cache: Cache = False,
+    p_correct: PCorrect = 0.5,
+    root_fanout: RootFanout = 8,
+    inner_fanout: InnerFanout = 3,
+    max_depth: MaxDepth = 3,
+    max_steps: MaxSteps = DS_STEPS,
+    n_workers: NWorkers = 8,
+    merge_on_commit: MergeOnCommit = False,
+    results_path: ResultsPath = RESULTS_PATH,
+) -> None:
+    """Search for features that predict late deliveries, keeping the promising candidates.
+
+    A bushy tree a few levels deep: 8 candidates off the root, each promising one refined by adding a
+    feature at a time. Every branch writes its own tables, and the highest scorer is published at the
+    end after reading every survivor's score at once.
+    """
+    if backend is Backend.databricks:
+        raise typer.BadParameter(
+            "a Databricks SQL warehouse can only run Python one row at a time, which put a single "
+            "feature table at 481s against 7s on Snowflake; this workload is not run there",
+            param_hint="BACKEND",
+        )
+    config = MacrobenchConfig(
+        seed=seed,
+        namespace=namespace or resolve(backend).DEFAULT_NAMESPACE,
+        cache=cache,
+        p_correct=p_correct,
+        root_fanout=root_fanout,
+        inner_fanout=inner_fanout,
+        max_depth=max_depth,
+        max_steps=max_steps,
+        n_workers=n_workers,
+        merge_on_commit=merge_on_commit,
+    )
+    _run(DATA_SCIENCE, backend, base_branch, config, results_path)

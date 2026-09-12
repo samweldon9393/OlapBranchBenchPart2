@@ -17,7 +17,10 @@ import polars as pl
 
 # The order a step runs in, which is also the order segments stack. Fixed, so an operation keeps
 # its colour whether or not a given run happens to contain it.
-OPERATIONS = ("create_branch", "run", "evaluate", "merge_branch", "delete_branch")
+OPERATIONS = ("create_branch", "run", "evaluate", "merge_branch", "delete_branch", "aggregate")
+
+# The backends, in the order their bars sit within a workload's group
+BACKENDS = ("bauplan", "snowflake", "databricks")
 
 OPERATION_LABELS = {
     "create_branch": "create branch",
@@ -25,6 +28,7 @@ OPERATION_LABELS = {
     "evaluate": "evaluate (check)",
     "merge_branch": "merge branch",
     "delete_branch": "delete branch",
+    "aggregate": "aggregate across branches",
 }
 
 # Rows whose operation ends this way carry the whole timed region rather than one operation
@@ -55,7 +59,7 @@ LIGHT = Theme(
     muted_ink="#898781",
     grid="#e1e0d9",
     axis="#c3c2b7",
-    series=("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"),
+    series=("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"),
 )
 
 DARK = Theme(
@@ -65,7 +69,7 @@ DARK = Theme(
     muted_ink="#898781",
     grid="#2c2c2a",
     axis="#383835",
-    series=("#3987e5", "#d95926", "#199e70", "#c98500", "#d55181"),
+    series=("#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300"),
 )
 
 
@@ -150,15 +154,19 @@ def plot_wall_clock(totals: pl.DataFrame, out_path: Path, theme: Theme) -> Path:
     a gridline or on telling two fills apart.
     """
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
 
     workloads = sorted(totals["workload"].unique().to_list())
-    backends = sorted(totals["backend"].unique().to_list())
-    colours = {backend: theme.series[i] for i, backend in enumerate(backends)}
+    present = set(totals["backend"].unique().to_list())
+    # A fixed order, so a backend keeps its colour and its place whichever others a results file holds
+    order = [*BACKENDS, *sorted(present - set(BACKENDS))]
+    backends = [backend for backend in order if backend in present]
+    colours = {backend: theme.series[order.index(backend)] for backend in backends}
 
     # A thin bar with air around it, and a 2px-equivalent gap between adjacent bars
     bar = 0.18
     gap = 0.03
-    figure, axes = plt.subplots(figsize=(9, 1.5 + 0.5 * len(workloads) * len(backends)))
+    figure, axes = plt.subplots(figsize=(9, 1.5 + 0.5 * len(workloads) * len(backends)), layout="constrained")
     figure.patch.set_facecolor(theme.surface)
 
     ticks, tick_labels = [], []
@@ -170,8 +178,7 @@ def plot_wall_clock(totals: pl.DataFrame, out_path: Path, theme: Theme) -> Path:
                 continue
             seconds = row["seconds"][0]
             y = w - span / 2 + b * (bar + gap)
-            axes.barh(y, seconds, height=bar, color=colours[backend], zorder=2,
-                      label=backend if w == 0 else None)
+            axes.barh(y, seconds, height=bar, color=colours[backend], zorder=2)
             axes.text(seconds + totals["seconds"].max() * 0.015, y, f"{seconds:,.0f}s",
                       va="center", ha="left", fontsize=9, color=theme.secondary_ink)
         ticks.append(w)
@@ -188,11 +195,13 @@ def plot_wall_clock(totals: pl.DataFrame, out_path: Path, theme: Theme) -> Path:
     axes.set_title("How long a workload takes end to end", loc="left", pad=22,
                    fontsize=13, color=theme.primary_ink)
     axes.text(0, 1.035, subtitle, transform=axes.transAxes, fontsize=9, color=theme.muted_ink)
-    # Below the plot, where it cannot sit on top of the longest bar
-    axes.legend(frameon=False, fontsize=9, labelcolor=theme.secondary_ink, loc="upper center",
-                bbox_to_anchor=(0.5, -0.22 if len(workloads) > 1 else -0.35), ncols=len(backends))
+    # Below the plot, where it cannot sit on top of the longest bar. Anchored to the figure rather
+    # than the axes, so the layout makes room for it under the axis label at any figure height. Built
+    # from the backends rather than the bars, so one that sat out the first workload still gets an entry.
+    figure.legend(handles=[Patch(color=colours[backend], label=backend) for backend in backends],
+                  frameon=False, fontsize=9, labelcolor=theme.secondary_ink, loc="outside lower center",
+                  ncols=len(backends))
 
-    figure.tight_layout()
     figure.savefig(out_path, dpi=200, facecolor=theme.surface)
     plt.close(figure)
     return out_path
@@ -216,7 +225,7 @@ def plot_by_operation(breakdown: pl.DataFrame, out_path: Path, theme: Theme) -> 
               for w, b in pairs}
     longest = max(totals.values())
 
-    figure, axes = plt.subplots(figsize=(10, 1.6 + 0.85 * len(pairs)))
+    figure, axes = plt.subplots(figsize=(10, 1.6 + 0.85 * len(pairs)), layout="constrained")
     figure.patch.set_facecolor(theme.surface)
 
     # A gap drawn in the surface colour, sized as a fraction of the axis, separates the segments
@@ -252,10 +261,9 @@ def plot_by_operation(breakdown: pl.DataFrame, out_path: Path, theme: Theme) -> 
     axes.set_title("Where a run spends its time", loc="left", pad=34, fontsize=13, color=theme.primary_ink)
     axes.text(0, 1.055, "branching against the work around it — summed across workers, so a run with several "
               "exceeds its wall clock", transform=axes.transAxes, fontsize=9, color=theme.muted_ink)
-    axes.legend(frameon=False, fontsize=9, labelcolor=theme.secondary_ink, loc="upper center",
-                bbox_to_anchor=(0.5, -0.16), ncols=len(present))
+    figure.legend(frameon=False, fontsize=9, labelcolor=theme.secondary_ink, loc="outside lower center",
+                  ncols=len(present))
 
-    figure.tight_layout()
     figure.savefig(out_path, dpi=200, facecolor=theme.surface)
     plt.close(figure)
     return out_path

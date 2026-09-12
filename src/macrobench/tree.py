@@ -10,7 +10,7 @@ attempt frees the slot it was holding and the next attempt starts from the same 
 
 import random
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from src.macrobench.experiment import Action, MacrobenchConfig, Workload
 
@@ -24,6 +24,7 @@ class Node:
     depth: int
     state: frozenset[str]  # targets built and passing on this branch
     slots_used: int = 0  # children claimed, whether in flight or committed
+    tried: set[str] = field(default_factory=set)  # targets ever attempted off this branch, kept or not
 
 
 class Tree:
@@ -76,9 +77,15 @@ class Tree:
                 self.rng.shuffle(parents)
                 for parent in parents:
                     action = self.workload.choose_action(
-                        self.workload, self.rng, parent.state, self.step, self.config.p_correct
+                        self.workload,
+                        self.rng,
+                        parent.state,
+                        frozenset(parent.tried),
+                        self.step,
+                        self.config.p_correct,
                     )
                     if action is not None:
+                        parent.tried.add(action.target)
                         step, self.step = self.step, self.step + 1
                         parent.slots_used += 1
                         self.in_flight += 1

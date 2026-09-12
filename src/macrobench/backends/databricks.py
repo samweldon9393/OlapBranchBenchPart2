@@ -22,11 +22,11 @@ so one set serves both.
 """
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from src.branch.databricks import connect as open_connection
 from src.branch.databricks import list_tables, split_namespace
-from src.branch.sql import Connection, Cursor
+from src.branch.sql import Connection, Cursor, ident
 from src.macrobench.backends.snowflake import _script, _statements
 from src.macrobench.experiment import Action, Fixture
 
@@ -169,7 +169,8 @@ def run(client: Connection, branch: str, namespace: str, action: Action, cache: 
     try:
         cursor = client.cursor()
         _use(cursor, branch)
-        for statement in _statements(_script(action.target, action.variant), dict(action.params)):
+        script = _script(action.builder) if action.builder else _script(action.target, action.variant)
+        for statement in _statements(script, dict(action.params)):
             cursor.execute(statement)
     except DatabricksError:
         return False
@@ -196,3 +197,26 @@ def evaluate(
         if row is not None and row[0]:
             passing.add(target)
     return frozenset(passing)
+
+
+def read_across(
+    client: Connection, branches: Sequence[str], namespace: str, table: str, cache: bool = False
+) -> dict[str, list[dict]]:
+    """Read one table off many branches in a single statement.
+
+    Each branch is a schema in the same catalog, so their copies of a table can be unioned directly.
+    """
+    readings: dict[str, list[dict]] = {branch: [] for branch in branches}
+    if not branches:
+        return readings
+    parts = []
+    for branch in branches:
+        catalog, schema = _schema(branch)
+        parts.append(f"SELECT '{catalog}.{schema}' AS branch_name__, * FROM {catalog}.{schema}.{ident(table)}")
+    cursor = client.cursor()
+    cursor.execute(" UNION ALL ".join(parts))
+    columns = [str(column[0]).lower() for column in cursor.description]
+    for row in cursor.fetchall():
+        record = dict(zip(columns, row, strict=True))
+        readings[record.pop("branch_name__")].append(record)
+    return readings
