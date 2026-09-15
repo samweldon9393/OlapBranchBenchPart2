@@ -57,7 +57,9 @@ def _try_merge(ops: MacroBackend, client: object, source_ref: str, into_branch: 
     return None
 
 
-def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: MacrobenchConfig) -> list[dict]:
+def _worker(
+    tree: Tree, ops: MacroBackend, workload: Workload, config: MacrobenchConfig, commits: list[str]
+) -> list[dict]:
     """Run steps until the tree says the run is done, returning this worker's result rows.
 
     The worker owns its client — connectors are not thread safe, and building one must never land
@@ -67,7 +69,7 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
     rows: list[dict] = []
 
     try:
-        rows = _steps(tree, ops, workload, config, client)
+        rows = _steps(tree, ops, workload, config, client, commits)
     finally:
         # A worker's client outlives every step it runs but nothing beyond that; left open, it is
         # still being torn down as the interpreter exits
@@ -76,9 +78,12 @@ def _worker(tree: Tree, ops: MacroBackend, workload: Workload, config: Macrobenc
 
 
 def _steps(
-    tree: Tree, ops: MacroBackend, workload: Workload, config: MacrobenchConfig, client: object
+    tree: Tree, ops: MacroBackend, workload: Workload, config: MacrobenchConfig, client: object, commits: list[str]
 ) -> list[dict]:
-    """Claim and run steps until the tree says the run is done."""
+    """Claim and run steps until the tree says the run is done.
+
+    `commits` are the refs the fixture recorded on the root, for a step that branches from one.
+    """
     rows: list[dict] = []
 
     while (claim := tree.claim()) is not None:
@@ -94,6 +99,9 @@ def _steps(
         passing: frozenset[str] = frozenset()
         conflict: Exception | None = None
         attempts = _max_attempts(config)
+        # Where the branch is cut from: the parent as it stands, or one of the root's past commits
+        source = parent.branch if action.at_commit is None else commits[action.at_commit]
+        origin = parent.branch.rsplit(".", 1)[-1] if action.at_commit is None else f"commit {action.at_commit}"
 
         for attempt in range(1, attempts + 1):
             # A retry is a fresh branch off the parent as it now stands. The branch that lost the
@@ -102,14 +110,14 @@ def _steps(
             suffix = "" if attempt == 1 else f"_a{attempt}"
             branch = f"{tree.root.branch}_s{step}{suffix}"
             attempt_start = time.perf_counter()
-            _step_note(step, config, action, "start", f"off {parent.branch.rsplit('.', 1)[-1]}")
+            _step_note(step, config, action, "start", f"off {origin}")
 
             row, _ = timed(
                 "create_branch",
                 step,
                 action.target,
                 branch,
-                partial(ops.create_branch, client, branch, parent.branch),
+                partial(ops.create_branch, client, branch, source),
             )
             step_rows.append(row)
             tree.opened(branch)
@@ -231,11 +239,25 @@ def run_workload(
         ops.materialize_fixture(client, root_branch, config.namespace, workload.fixture, config.cache)
         _note("setup", f"fixture ready with {len(workload.fixture.tables)} tables")
 
+        # A workload that goes back through history needs a history to go back through. Its commits
+        # run on the root like any other action, and a snapshot after each is the ref a step can
+        # branch from; commits[0] is the fixture itself, before any of them.
+        commits: list[str] = []
+        if workload.fixture.commits:
+            commits.append(ops.snapshot(client, root_branch))
+            for commit in workload.fixture.commits:
+                if not ops.run(client, root_branch, config.namespace, commit, config.cache):
+                    raise RuntimeError(f"fixture commit {dict(commit.params)} failed on {root_branch}")
+                commits.append(ops.snapshot(client, root_branch))
+            _note("setup", f"{len(workload.fixture.commits)} commits made on the root")
+
         # ---- timed region ----
         workload_started_at = datetime.now(tz=UTC)
         workload_perf_start = time.perf_counter()
         with ThreadPoolExecutor(max_workers=config.n_workers) as pool:
-            per_worker = list(pool.map(lambda _: _worker(tree, ops, workload, config), range(config.n_workers)))
+            per_worker = list(
+                pool.map(lambda _: _worker(tree, ops, workload, config, commits), range(config.n_workers))
+            )
         rows = [row for worker_rows in per_worker for row in worker_rows]
 
         # When steps merge as they go there is nothing left to publish; the root already has it all.
@@ -266,13 +288,14 @@ def run_workload(
                     leaves,
                     key=lambda node: max((r[column] for r in readings.get(node.branch, [])), default=float("-inf")),
                 )
-            row, _ = timed(
-                "merge_branch",
-                -1,
-                "",
-                best.branch,
-                partial(ops.merge_branch, client, best.branch, root_branch),
+            # A leaf built off a past commit cannot be merged, because the root has changed the same
+            # tables since; such a workload publishes by overwriting them, timed as the publish it is
+            publish = (
+                partial(ops.overwrite_branch, client, best.branch, root_branch, config.namespace)
+                if workload.overwrite_on_publish
+                else partial(ops.merge_branch, client, best.branch, root_branch)
             )
+            row, _ = timed("merge_branch", -1, "", best.branch, publish)
             rows.append(row)
 
         workload_duration_s = time.perf_counter() - workload_perf_start

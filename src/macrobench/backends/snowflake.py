@@ -11,6 +11,7 @@ Where Bauplan does the work of a step by running a project, Snowflake runs SQL, 
 each target has a script here rather than a project directory.
 """
 
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from io import StringIO
@@ -144,10 +145,36 @@ def _tables(cursor: Cursor, database: str, namespace: str) -> list[tuple[object,
 def create_branch(client: Connection, branch: str, from_ref: str) -> str:
     """Zero-copy clone the source database into a new one; return its name to branch from.
 
-    Exactly part 1's create: one statement covering the whole database.
+    Exactly part 1's create: one statement covering the whole database. From a snapshot (`db@qid`)
+    the clone is taken by Time Travel instead, as the database stood right before that statement.
     """
-    client.cursor().execute(f"CREATE DATABASE {ident(branch)} CLONE {ident(from_ref)}")
+    source, _, statement = from_ref.partition("@")
+    at = f" BEFORE(STATEMENT => '{_query_id(statement)}')" if statement else ""
+    client.cursor().execute(f"CREATE DATABASE {ident(branch)} CLONE {ident(source)}{at}")
     return branch
+
+
+def _query_id(value: str) -> str:
+    """Validate a query id before it is interpolated into a clone, the way ident() does a name."""
+    if not re.fullmatch(r"[0-9a-f-]+", value):
+        raise ValueError(f"not a Snowflake query id: {value}")
+    return value
+
+
+def snapshot(client: Connection, branch: str) -> str:
+    """The database as it stands now, as `db@qid`, somewhere create_branch can clone from.
+
+    Snowflake has no commits to name, only points in time, so this makes one: a trivial statement
+    whose query id is the reference. Cloning BEFORE it gives the state right after every change made
+    until then, and Time Travel keeps that reachable for the retention period, a day by default.
+    """
+    cursor = client.cursor()
+    cursor.execute("SELECT 1")
+    cursor.execute("SELECT LAST_QUERY_ID()")
+    row = cursor.fetchone()
+    if row is None:
+        raise RuntimeError(f"no query id to snapshot {branch} by")
+    return f"{branch}@{_query_id(str(row[0]))}"
 
 
 def delete_branch(client: Connection, branch: str) -> None:
@@ -179,6 +206,15 @@ def merge_branch(client: Connection, source_ref: str, into_branch: str) -> None:
         source = f"{ident(source_ref)}.{ident(schema)}.{ident(table)}"
         cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {ident(into_branch)}.{ident(schema)}")
         cursor.execute(f"CREATE OR REPLACE TABLE {destination} CLONE {source}")
+
+
+def overwrite_branch(client: Connection, source_ref: str, into_branch: str, namespace: str) -> None:
+    """Publish a branch by overwriting the destination's tables with its own.
+
+    That is already what merge_branch does here: it clones every table the branch holds over the
+    destination's, which covers the ones the branch rewrote whatever it was cut from.
+    """
+    merge_branch(client, source_ref, into_branch)
 
 
 def run(client: Connection, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:

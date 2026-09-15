@@ -13,19 +13,6 @@ from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
-class Fixture:
-    """The setup a workload needs on the root branch before any timed step runs.
-
-    The name identifies the fixture to the backend, which knows how it builds one; the tables are
-    what has to exist afterwards, and are checked so a half-built fixture fails setup loudly rather
-    than showing up later as a workload that can never finish.
-    """
-
-    name: str
-    tables: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class Action:
     """One attempt the agent can make: a target to build, which version of it, and any parameters.
 
@@ -42,11 +29,32 @@ class Action:
     # What builds the attempt, when that is not a project or script named after the target: a
     # workload whose every step runs the same builder with different parameters names it here
     builder: str = ""
+    # Where the attempt branches from, when that is not its parent as it stands: the index of one of
+    # the commits the fixture made, for a workload that goes back through the root's history
+    at_commit: int | None = None
 
     @property
     def variant(self) -> str:
         """Which version of the rewrite to apply."""
         return "correct" if self.correct else "broken"
+
+
+@dataclass(frozen=True)
+class Fixture:
+    """The setup a workload needs on the root branch before any timed step runs.
+
+    The name identifies the fixture to the backend, which knows how it builds one; the tables are
+    what has to exist afterwards, and are checked so a half-built fixture fails setup loudly rather
+    than showing up later as a workload that can never finish.
+
+    A workload that goes back through history also names the commits to make on top, in order. Each
+    is an ordinary action run on the root, and the state after each is recorded so that a step can
+    branch from it later.
+    """
+
+    name: str
+    tables: tuple[str, ...]
+    commits: tuple[Action, ...] = ()
 
 
 # Picking the next attempt is the one thing that genuinely differs per workload, so it is a
@@ -79,6 +87,10 @@ class Workload:
     # How to pick the branch a run publishes, for a workload whose leaves are not ranked by how much
     # they built: a (table, column) read off every surviving leaf at once, the highest value winning
     rank_by: tuple[str, str] | None = None
+    # Publish the chosen leaf by making the root's tables match it rather than by merging it. For a
+    # workload whose leaves are built off a past commit: the root has changed the same tables since,
+    # so a merge conflicts by construction, and taking the fix means overwriting them
+    overwrite_on_publish: bool = False
 
 
 @dataclass(frozen=True)

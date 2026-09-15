@@ -26,7 +26,7 @@ class MacroBackend(Protocol):
     """What a backend must expose to run an end-to-end workload against it.
 
     Nothing here knows which workload is running: what to set up and what counts as correct arrive
-    as arguments, so the same eight operations serve all four.
+    as arguments, so the same operations serve all four.
     """
 
     # Where this backend keeps the TPC-H tables. Each spells it differently — a Bauplan namespace, a
@@ -53,7 +53,13 @@ class MacroBackend(Protocol):
         ...
 
     def create_branch(self, client: object, branch: str, from_ref: str) -> str:
-        """Branch off a ref and return the new branch's name."""
+        """Branch off a ref — a branch, or a snapshot of one — and return the new branch's name."""
+        ...
+
+    def snapshot(self, client: object, branch: str) -> str:
+        """A ref to the branch as it stands now, which create_branch accepts as somewhere to branch from.
+
+        What it holds is the backend's business: a commit, a point in time, or a version per table."""
         ...
 
     def delete_branch(self, client: object, branch: str) -> None:
@@ -62,6 +68,13 @@ class MacroBackend(Protocol):
 
     def merge_branch(self, client: object, source_ref: str, into_branch: str) -> None:
         """Merge a branch back into another one."""
+        ...
+
+    def overwrite_branch(self, client: object, source_ref: str, into_branch: str, namespace: str) -> None:
+        """Make every table the source rewrote match the source on the destination.
+
+        Publishing without merging, for a branch built off a past commit whose destination has since
+        changed the same tables."""
         ...
 
     def run(self, client: object, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:

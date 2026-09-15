@@ -64,16 +64,37 @@ def connect() -> Connection:
     return connection
 
 
-def _clone_tables(cursor: Cursor, source: str, destination: str, deep: bool) -> None:
-    """Clone every table of one schema into another."""
+def _clone_tables(
+    cursor: Cursor, source: str, destination: str, deep: bool, versions: Mapping[str, int] | None = None
+) -> None:
+    """Clone every table of one schema into another.
+
+    Given the versions a snapshot recorded, each table is cloned as it stood at its version instead,
+    and a table the snapshot does not name did not exist yet, so it is left out.
+    """
     source_catalog, source_schema = _schema(source)
     target_catalog, target_schema = _schema(destination)
     kind = "DEEP" if deep else "SHALLOW"
     for table in list_tables(cursor, source_catalog, source_schema):
+        if versions is None:
+            at = ""
+        elif table in versions:
+            at = f" VERSION AS OF {versions[table]}"
+        else:
+            continue
         cursor.execute(
             f"CREATE TABLE {target_catalog}.{target_schema}.{table} "
-            f"{kind} CLONE {source_catalog}.{source_schema}.{table}"
+            f"{kind} CLONE {source_catalog}.{source_schema}.{table}{at}"
         )
+
+
+def _version(cursor: Cursor, table: str) -> int:
+    """The latest version in a table's Delta history."""
+    cursor.execute(f"DESCRIBE HISTORY {table} LIMIT 1")
+    row = cursor.fetchone()
+    if row is None:
+        raise RuntimeError(f"{table} has no history")
+    return int(str(row[0]))
 
 
 def close(client: Connection) -> None:
@@ -117,12 +138,33 @@ def materialize_fixture(
 
 
 def create_branch(client: Connection, branch: str, from_ref: str) -> str:
-    """Shallow clone every table of the parent schema into a new one. Exactly part 1's create."""
+    """Shallow clone every table of the parent schema into a new one. Exactly part 1's create.
+
+    From a snapshot (`catalog.schema@table=version,...`) each table is cloned at its recorded version
+    instead. Those are still clones of the source's own tables, so the branch is one level deep like
+    any other.
+    """
+    source, _, at = from_ref.partition("@")
+    versions = {ident(table): int(version) for table, version in (p.split("=") for p in at.split(","))} if at else None
     catalog, schema = _schema(branch)
     cursor = client.cursor()
     cursor.execute(f"CREATE SCHEMA {catalog}.{schema}")
-    _clone_tables(cursor, from_ref, branch, deep=False)
+    _clone_tables(cursor, source, branch, deep=False, versions=versions)
     return branch
+
+
+def snapshot(client: Connection, branch: str) -> str:
+    """The schema as it stands now, as `catalog.schema@table=version,...`, for create_branch to clone.
+
+    Delta keeps history per table rather than per schema, so no single point names the whole branch;
+    the latest version of every table, taken together, is the ref.
+    """
+    catalog, schema = _schema(branch)
+    cursor = client.cursor()
+    versions = [
+        (table, _version(cursor, f"{catalog}.{schema}.{table}")) for table in list_tables(cursor, catalog, schema)
+    ]
+    return f"{branch}@{','.join(f'{table}={version}' for table, version in versions)}"
 
 
 def delete_branch(client: Connection, branch: str) -> None:
@@ -132,29 +174,38 @@ def delete_branch(client: Connection, branch: str) -> None:
 
 
 def merge_branch(client: Connection, source_ref: str, into_branch: str) -> None:
-    """Publish a branch by deep-cloning the tables it added onto the destination.
+    """Publish a branch by deep-cloning the tables it added or rewrote onto the destination.
 
     Databricks has no merge, and two of its properties decide how this has to be emulated. A shallow
     clone would break as soon as the branch is dropped, since the clone points at the branch's
-    files, so what lands has to be a real copy. And only the tables the branch *added* are copied:
+    files, so what lands has to be a real copy. And only the tables the branch changed are copied:
     deep-cloning everything would copy the whole dataset on every publish, and the tables a branch
-    inherited are the ones the destination already has.
+    inherited untouched are the ones the destination already has.
 
-    That does mean this publishes additions rather than modifications, which is enough for a
-    workload whose steps each build their own table and not for one that rewrites a shared one.
+    A table's own history says whether the branch changed it. A clone's history starts at the clone,
+    version 0, so anything past that was written on the branch; a table the destination lacks was
+    added. Reading the history costs a statement per table, which is part of what publishing costs.
     """
     cursor = client.cursor()
     source_catalog, source_schema = _schema(source_ref)
     target_catalog, target_schema = _schema(into_branch)
 
-    added = set(list_tables(cursor, source_catalog, source_schema)) - set(
-        list_tables(cursor, target_catalog, target_schema)
-    )
-    for table in sorted(added):
+    source_tables = list_tables(cursor, source_catalog, source_schema)
+    added = set(source_tables) - set(list_tables(cursor, target_catalog, target_schema))
+    rewritten = {table for table in source_tables if _version(cursor, f"{source_catalog}.{source_schema}.{table}") > 0}
+    for table in sorted(added | rewritten):
         cursor.execute(
             f"CREATE OR REPLACE TABLE {target_catalog}.{target_schema}.{table} "
             f"DEEP CLONE {source_catalog}.{source_schema}.{table}"
         )
+
+
+def overwrite_branch(client: Connection, source_ref: str, into_branch: str, namespace: str) -> None:
+    """Publish a branch by overwriting the destination's tables with the ones it rewrote.
+
+    That is already what merge_branch does here; the namespace is the branch itself on this backend.
+    """
+    merge_branch(client, source_ref, into_branch)
 
 
 def run(client: Connection, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:

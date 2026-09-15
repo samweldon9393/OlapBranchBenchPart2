@@ -1,0 +1,11 @@
+project:
+  id: c4b8e2d6-1f5a-4c9b-8e3d-7a2f6b1c9e05
+  name: macrobench_fix_probe
+
+parameters:
+  variant:
+    default: correct
+  commit:
+    default: "0"
+  kind:
+    default: duplicate

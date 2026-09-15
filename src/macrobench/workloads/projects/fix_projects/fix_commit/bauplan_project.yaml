@@ -1,0 +1,19 @@
+project:
+  id: 2a6e9c41-8b3d-4f7e-a1c5-6d9f0b2e4c83
+  name: macrobench_fix_commit
+
+parameters:
+  variant:
+    default: correct
+  batch:
+    default: "24"
+  start:
+    default: "1994-01-01"
+  end:
+    default: "1994-02-01"
+  cut:
+    default: "1994-01-11"
+  kind:
+    default: duplicate
+  bad:
+    default: "0"

@@ -1,0 +1,29 @@
+project:
+  id: 9e3c7a15-4d2b-4b8f-9c6e-1a5d8f3b7c29
+  name: macrobench_fix_repair
+
+parameters:
+  variant:
+    default: correct
+  commit:
+    default: "0"
+  strategy:
+    default: dedupe
+  scope:
+    default: batch
+  culprit:
+    default: "24"
+  scope_lo:
+    default: "24"
+  scope_hi:
+    default: "24"
+  scope_end:
+    default: "1994-02-01"
+  start:
+    default: "1994-01-01"
+  end:
+    default: "1994-02-01"
+  cut:
+    default: "1994-01-11"
+  kind:
+    default: duplicate

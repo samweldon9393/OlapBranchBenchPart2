@@ -100,6 +100,11 @@ def create_branch(client: bauplan.Client, branch: str, from_ref: str) -> str:
     return branch
 
 
+def snapshot(client: bauplan.Client, branch: str) -> str:
+    """The branch's head commit, as `branch@hash`, which create_branch takes as it is."""
+    return f"{branch}@{client.get_branch(branch).hash}"
+
+
 def delete_branch(client: bauplan.Client, branch: str) -> None:
     """Delete a branch."""
     client.delete_branch(branch=branch)
@@ -108,6 +113,25 @@ def delete_branch(client: bauplan.Client, branch: str) -> None:
 def merge_branch(client: bauplan.Client, source_ref: str, into_branch: str) -> None:
     """Merge a branch back into another one."""
     client.merge_branch(source_ref=source_ref, into_branch=into_branch)
+
+
+def overwrite_branch(client: bauplan.Client, source_ref: str, into_branch: str, namespace: str) -> None:
+    """Publish a branch by making the destination's copy of every table it rewrote match its own.
+
+    A branch built off a past commit cannot be merged once the destination has changed the same
+    tables since: Bauplan merges per table, and both sides touched them. Reverting each such table to
+    the branch's version is the per-table overwrite the other backends' merges already are. A table
+    was rewritten, or added, when its current snapshot differs between the two refs.
+    """
+    theirs = {
+        table.name: table.current_snapshot_id for table in client.get_tables(into_branch, filter_by_namespace=namespace)
+    }
+    for table in client.get_tables(source_ref, filter_by_namespace=namespace):
+        if theirs.get(table.name) != table.current_snapshot_id:
+            # The table is named with its namespace; revert_table does not apply a separate one
+            client.revert_table(
+                f"{namespace}.{table.name}", source_ref=source_ref, into_branch=into_branch, replace=True
+            )
 
 
 def run(client: bauplan.Client, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
