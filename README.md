@@ -239,7 +239,3 @@ Rows land in `results/macrobench.parquet` by default, carrying `backend`, `workl
 ### Status
 
 All four workloads — data engineering, WAP, data science and fixing — run on Bauplan, Snowflake and Databricks, with two exceptions that are facts about the platforms rather than holes in the harness. Databricks cannot branch off a branch, since a shallow clone cannot itself be shallow-cloned, so it fails the data engineering chain at depth 2. And data science is refused on Databricks outright: a SQL warehouse runs Python only one row at a time, which put a single feature table at 481s there against 7s on Snowflake.
-
-Not yet done: schema evolution as a step — every attempt currently changes values, not shapes. No results are published for part 2 yet.
-
-Part 2's numbers were re-baselined when the workloads were made to do the same work on every backend, so measurements taken before that are not comparable with ones taken after.
