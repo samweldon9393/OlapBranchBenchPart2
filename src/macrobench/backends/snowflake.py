@@ -7,55 +7,28 @@ Nothing about those two primitives differs between the parts, so the numbers sta
 What has no Snowflake equivalent is merging. A clone is a whole database, not a set of commits, so
 publishing a branch means copying its tables back over the parent's — see merge_branch.
 
-Where Bauplan does the work of a step by running a project, Snowflake runs SQL, so each fixture and
-each target has a script here rather than a project directory.
+Running a build and reading a branch are shared with Databricks, in backends/sql.py; everything this
+platform does differently is the DIALECT below.
 """
 
 import re
 import uuid
-from collections.abc import Mapping, Sequence
-from io import StringIO
-from pathlib import Path
+from collections.abc import Sequence
+
+# The connector ships no usable types, which is why part 1's Protocols exist; the error class is
+# imported here rather than lazily because it is what tells a failed build from a broken connection
+from snowflake.connector.errors import Error as SnowflakeError
 
 from src.branch.snowflake import connect as open_connection
+from src.branch.snowflake import list_tables
 from src.branch.sql import Connection, Cursor, ident
-from src.macrobench.experiment import Action, Fixture
+from src.macrobench.backends import sql
+from src.macrobench.backends.refs import pack_ref, unpack_ref
+from src.macrobench.experiment import Action
 
 # The schema the TPC-H tables live in on this backend, used when a run does not name one.
 # Snowflake folds unquoted identifiers to upper case, so this is spelled the way it is stored.
 DEFAULT_NAMESPACE = "TPCH_SF1"
-
-# The SQL a fixture or a target is built by, named after it and grouped under the workload it
-# belongs to. A fixture is `<name>.sql`; a target has one script per variant, `<name>.correct.sql`
-# and `<name>.broken.sql`, mirroring the way a Bauplan project takes the variant as a run parameter.
-# Script names are unique across the groups, so one index over all of them is enough to find any
-# script without the backend having to be told which workload is running.
-SQL_ROOT = Path(__file__).parents[1] / "workloads" / "sql"
-SCRIPTS = {script.name: script for script in SQL_ROOT.glob("*/*.sql")}
-
-
-def _script(name: str, variant: str | None = None) -> Path:
-    """The SQL script that builds a named fixture or target."""
-    filename = f"{name}.{variant}.sql" if variant else f"{name}.sql"
-    try:
-        return SCRIPTS[filename]
-    except KeyError:
-        raise RuntimeError(f"no snowflake script {filename} under {SQL_ROOT}") from None
-
-
-def _statements(script: Path, params: Mapping[str, str]) -> list[str]:
-    """The statements in a script, in order.
-
-    Splitting is the connector's own, which knows that a semicolon inside a comment or a string
-    literal does not end a statement. Splitting on semicolons by hand looks like it works right up
-    until a comment contains one, at which point the script quietly becomes two broken fragments.
-    """
-    from snowflake.connector.util_text import split_statements
-
-    sql = script.read_text()
-    if params:
-        sql = sql.format(**params)
-    return [statement for statement, _is_put_or_get in split_statements(StringIO(sql)) if statement.strip()]
 
 
 def _use(cursor: Cursor, branch: str, namespace: str) -> None:
@@ -70,12 +43,33 @@ def _use(cursor: Cursor, branch: str, namespace: str) -> None:
 
 
 def _set_cache(cursor: Cursor, cache: bool) -> None:
-    """Snowflake's equivalent of the caching flag, passed explicitly on every step.
+    """Snowflake's spelling of the caching flag.
 
     Left alone, a repeated query is served from the result cache and times a lookup instead of the
     work, and how warm the cache was would depend on what had already been run on the account.
     """
     cursor.execute(f"ALTER SESSION SET USE_CACHED_RESULT = {'TRUE' if cache else 'FALSE'}")
+
+
+def _qualify(branch: str, namespace: str, table: str) -> str:
+    """Name a table on a branch the session is not pointed at."""
+    return f"{ident(branch)}.{ident(namespace)}.{ident(table)}"
+
+
+def _list_tables(cursor: Cursor, branch: str, namespace: str) -> frozenset[str]:
+    """The base tables in the branch's copy of the namespace, lower-cased."""
+    return frozenset(
+        table.lower() for schema, table in list_tables(cursor, branch) if schema.upper() == namespace.upper()
+    )
+
+
+DIALECT = sql.Dialect(
+    failure=SnowflakeError,
+    use=_use,
+    qualify=_qualify,
+    list_tables=_list_tables,
+    set_cache=_set_cache,
+)
 
 
 def connect() -> Connection:
@@ -102,53 +96,17 @@ def close(client: Connection) -> None:
 
 
 def create_root_branch(client: Connection, base_branch: str) -> str:
-    """Clone the base database into the run's root and return its name.
-
-    The root carries only what the base database already had; materialize_fixture puts the
-    workload's tables on top of it.
-    """
-    root_branch = f"MACROBENCH_ROOT_{uuid.uuid4().hex.upper()}"
-    return create_branch(client, root_branch, base_branch)
-
-
-def materialize_fixture(
-    client: Connection, branch: str, namespace: str, fixture: Fixture, cache: bool = False
-) -> None:
-    """Build the workload's fixture on the branch.
-
-    This is setup, not measurement: once it has run, the branch holds whatever the workload needs
-    to start from, so every timed step can clone it and inherit the lot without rebuilding
-    anything. The fixture names the tables it owes, and they are checked here so a fixture that
-    half-built fails now rather than as a workload that can never finish.
-    """
-    cursor = client.cursor()
-    _set_cache(cursor, cache)
-    _use(cursor, branch, namespace)
-    for statement in _statements(_script(fixture.name), {}):
-        cursor.execute(statement)
-
-    materialized = {str(row[0]).lower() for row in _tables(cursor, branch, namespace)}
-    missing = {table for table in fixture.tables if table.lower() not in materialized}
-    if missing:
-        raise RuntimeError(f"fixture run left {branch}.{namespace} without: {', '.join(sorted(missing))}")
-
-
-def _tables(cursor: Cursor, database: str, namespace: str) -> list[tuple[object, ...]]:
-    """The base tables in one schema of a database."""
-    cursor.execute(
-        f"SELECT table_name FROM {ident(database)}.INFORMATION_SCHEMA.TABLES "
-        f"WHERE table_type = 'BASE TABLE' AND table_schema = '{ident(namespace).upper()}'"
-    )
-    return cursor.fetchall()
+    """Clone the base database into the run's root and return its name."""
+    return create_branch(client, f"MACROBENCH_ROOT_{uuid.uuid4().hex.upper()}", base_branch)
 
 
 def create_branch(client: Connection, branch: str, from_ref: str) -> str:
     """Zero-copy clone the source database into a new one; return its name to branch from.
 
-    Exactly part 1's create: one statement covering the whole database. From a snapshot (`db@qid`)
-    the clone is taken by Time Travel instead, as the database stood right before that statement.
+    Exactly part 1's create: one statement covering the whole database. From a snapshot the clone is
+    taken by Time Travel instead, as the database stood right before that statement ran.
     """
-    source, _, statement = from_ref.partition("@")
+    source, statement = unpack_ref(from_ref)
     at = f" BEFORE(STATEMENT => '{_query_id(statement)}')" if statement else ""
     client.cursor().execute(f"CREATE DATABASE {ident(branch)} CLONE {ident(source)}{at}")
     return branch
@@ -162,7 +120,7 @@ def _query_id(value: str) -> str:
 
 
 def snapshot(client: Connection, branch: str) -> str:
-    """The database as it stands now, as `db@qid`, somewhere create_branch can clone from.
+    """The database as it stands now, as somewhere create_branch can clone from.
 
     Snowflake has no commits to name, only points in time, so this makes one: a trivial statement
     whose query id is the reference. Cloning BEFORE it gives the state right after every change made
@@ -174,7 +132,7 @@ def snapshot(client: Connection, branch: str) -> str:
     row = cursor.fetchone()
     if row is None:
         raise RuntimeError(f"no query id to snapshot {branch} by")
-    return f"{branch}@{_query_id(str(row[0]))}"
+    return pack_ref(branch, _query_id(str(row[0])))
 
 
 def delete_branch(client: Connection, branch: str) -> None:
@@ -199,9 +157,9 @@ def merge_branch(client: Connection, source_ref: str, into_branch: str) -> None:
         f"SELECT table_schema, table_name FROM {ident(source_ref)}.INFORMATION_SCHEMA.TABLES "
         "WHERE table_type = 'BASE TABLE'"
     )
-    tables = [(str(schema), str(table)) for schema, table in cursor.fetchall()]
+    tables_to_copy = [(str(schema), str(table)) for schema, table in cursor.fetchall()]
 
-    for schema, table in tables:
+    for schema, table in tables_to_copy:
         destination = f"{ident(into_branch)}.{ident(schema)}.{ident(table)}"
         source = f"{ident(source_ref)}.{ident(schema)}.{ident(table)}"
         cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {ident(into_branch)}.{ident(schema)}")
@@ -217,78 +175,23 @@ def overwrite_branch(client: Connection, source_ref: str, into_branch: str, name
     merge_branch(client, source_ref, into_branch)
 
 
+def tables(client: Connection, branch: str, namespace: str) -> frozenset[str]:
+    """The tables the branch holds."""
+    return sql.tables(client, DIALECT, branch, namespace)
+
+
 def run(client: Connection, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
-    """Apply the action's rewrite on the branch by running the target's script.
-
-    A script that fails is not an error the benchmark should stop for: writing something that does
-    not build is one of the ways an attempt can be wrong, and such a step gets pruned like any
-    other dead end. Only Snowflake's own errors are swallowed, so a broken connection or bad
-    credentials still surface instead of looking like a very unlucky agent.
-    """
-    from snowflake.connector.errors import Error as SnowflakeError
-
-    try:
-        cursor = client.cursor()
-        _set_cache(cursor, cache)
-        _use(cursor, branch, namespace)
-        script = _script(action.builder) if action.builder else _script(action.target, action.variant)
-        for statement in _statements(script, dict(action.params)):
-            cursor.execute(statement)
-    except SnowflakeError:
-        return False
-    return True
+    """Build the action on the branch by running its script."""
+    return sql.run(client, DIALECT, branch, namespace, action, cache)
 
 
-def evaluate(
-    client: Connection, branch: str, namespace: str, checks: Mapping[str, str], cache: bool = False
-) -> frozenset[str]:
-    """Run each target's check on the branch and return the ones that pass.
-
-    The workload supplies the SQL and this only reads the boolean it returns, so what counts as
-    correct never has to be known here. A target that never materialized, or whose check will not
-    typecheck against what it built, raises out of the query; that counts as not passing rather
-    than as a benchmark failure.
-    """
-    from snowflake.connector.errors import Error as SnowflakeError
-
-    cursor = client.cursor()
-    _set_cache(cursor, cache)
-    _use(cursor, branch, namespace)
-
-    passing = set()
-    for target, sql in checks.items():
-        try:
-            cursor.execute(sql)
-            row = cursor.fetchone()
-        except SnowflakeError as error:
-            print(f"check for {target} on {branch} failed: {error}")
-            continue
-        if row is not None and row[0]:
-            passing.add(target)
-    return frozenset(passing)
+def query(client: Connection, branch: str, namespace: str, statement: str, cache: bool = False) -> list[dict]:
+    """Read the branch."""
+    return sql.query(client, DIALECT, branch, namespace, statement, cache)
 
 
 def read_across(
     client: Connection, branches: Sequence[str], namespace: str, table: str, cache: bool = False
 ) -> dict[str, list[dict]]:
-    """Read one table off many branches in a single statement.
-
-    Each branch is a database, so their copies of a table can be unioned directly. Snowflake reports
-    column names in upper case; they are folded to match what the other backends return.
-    """
-    readings: dict[str, list[dict]] = {branch: [] for branch in branches}
-    if not branches:
-        return readings
-    cursor = client.cursor()
-    _set_cache(cursor, cache)
-    cursor.execute(
-        " UNION ALL ".join(
-            f"SELECT '{ident(branch)}' AS branch_name__, * FROM {ident(branch)}.{ident(namespace)}.{ident(table)}"
-            for branch in branches
-        )
-    )
-    columns = [str(column[0]).lower() for column in cursor.description]
-    for row in cursor.fetchall():
-        record = dict(zip(columns, row, strict=True))
-        readings[record.pop("branch_name__")].append(record)
-    return readings
+    """Read one table off many branches in a single statement."""
+    return sql.read_across(client, DIALECT, branches, namespace, table, cache)

@@ -1,14 +1,17 @@
 -- The fixing fixture: two years of lineitem batches loaded cleanly, and the mart built over them.
 --
--- A batch is one month of lineitems by ship date, numbered from January 1992. li_raw keeps every
--- batch as it was loaded and li_clean is what the mart reads. They start out the same, and only a
--- repair ever makes them differ. The commits made on top of this only ever append to the three
--- tables, so each leaves behind a state the history can go back to exactly.
+-- A batch is one month of lineitems by ship date, numbered from the first year the workload counts
+-- from. li_raw keeps every batch as it was loaded and li_clean is what the mart reads. They start
+-- out the same, and only a repair ever makes them differ. The commits made on top of this only ever
+-- append to the three tables, so each leaves behind a state the history can go back to exactly.
+--
+-- Money stays DECIMAL throughout, which is what lets the workload's revenue check ask for equality.
 CREATE OR REPLACE TABLE li_raw AS
 SELECT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate,
-       CAST((EXTRACT(YEAR FROM l_shipdate) - 1992) * 12 + EXTRACT(MONTH FROM l_shipdate) - 1 AS INT) AS batch_id
+       CAST((EXTRACT(YEAR FROM l_shipdate) - {first_year}) * 12 + EXTRACT(MONTH FROM l_shipdate) - 1 AS INT)
+           AS batch_id
 FROM lineitem
-WHERE l_shipdate < CAST('1994-01-01' AS DATE);
+WHERE l_shipdate < CAST('{base_end}' AS DATE);
 
 CREATE OR REPLACE TABLE li_clean AS SELECT * FROM li_raw;
 

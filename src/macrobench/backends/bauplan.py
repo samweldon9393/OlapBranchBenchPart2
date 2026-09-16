@@ -1,12 +1,22 @@
+"""Bauplan's side of the macrobenchmark.
+
+Branches are native here, so create, delete and merge are the SDK calls part 1 times, and a snapshot
+is a commit hash the catalogue already has. What is not native is running SQL: only a project run
+materializes anything, so every build this backend can do is a real project directory under
+workloads/projects, named after the build and, where a build has several implementations, after the
+variant too.
+"""
+
 import os
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import bauplan
 from dotenv import load_dotenv
 
-from src.macrobench.experiment import Action, Fixture
+from src.macrobench.backends.refs import pack_ref
+from src.macrobench.experiment import Action
 
 # Credentials come from .env file
 load_dotenv()
@@ -14,10 +24,10 @@ load_dotenv()
 # The namespace the TPC-H tables live in on this backend, used when a run does not name one
 DEFAULT_NAMESPACE = "tpch_1"
 
-# Bauplan does the work of a step by running a project, so every fixture and every target this
-# backend can build has a project named after it, grouped under the workload it belongs to. Project
-# names are unique across those groups, so one index over all of them is enough to find any project
-# without the backend having to be told which workload is running.
+# Bauplan does the work of a step by running a project, so every build this backend can do has a
+# project named after it, grouped under the workload it belongs to. Project names are unique across
+# those groups, so one index over all of them is enough to find any project without the backend
+# having to be told which workload is running.
 PROJECTS_ROOT = Path(__file__).parents[1] / "workloads" / "projects"
 PROJECTS = {
     project.name: project
@@ -26,12 +36,18 @@ PROJECTS = {
 }
 
 
-def _project(name: str) -> Path:
-    """The Bauplan project that builds a named fixture or target."""
-    try:
-        return PROJECTS[name]
-    except KeyError:
-        raise RuntimeError(f"no bauplan project named {name} under {PROJECTS_ROOT}") from None
+def _project(build: str, variant: str = "") -> Path:
+    """The Bauplan project a build runs.
+
+    A build whose variants read different tables has a project each, `<build>.<variant>`, the way
+    the SQL side has a script each — reading a table only to throw it away would cost this backend
+    work the others never do. Where one project can build either variant it takes the variant as a
+    parameter instead, and a single directory serves both.
+    """
+    for name in (f"{build}.{variant}", build):
+        if name in PROJECTS:
+            return PROJECTS[name]
+    raise RuntimeError(f"no bauplan project named {build} under {PROJECTS_ROOT}")
 
 
 def _cache_mode(cache: bool) -> str:
@@ -54,11 +70,7 @@ def close(client: bauplan.Client) -> None:
 
 
 def create_root_branch(client: bauplan.Client, base_branch: str) -> str:
-    """Create the root branch off the base ref and return its name.
-
-    The root carries only what the base ref already had; materialize_fixture puts the workload's
-    tables on top of it.
-    """
+    """Create the root branch off the base ref and return its name."""
     user = client.info().user
     if user is None:
         raise RuntimeError("could not resolve the authenticated bauplan user")
@@ -69,40 +81,19 @@ def create_root_branch(client: bauplan.Client, base_branch: str) -> str:
     return root_branch
 
 
-def materialize_fixture(
-    client: bauplan.Client, branch: str, namespace: str, fixture: Fixture, cache: bool = False
-) -> None:
-    """Build the workload's fixture on the branch.
-
-    This is setup, not measurement: once it has run, the branch holds whatever the workload needs
-    to start from, so every timed step can branch off it and inherit the lot without rebuilding
-    anything. The fixture names the tables it owes, and they are checked here so a fixture that
-    half-built fails now rather than as a workload that can never finish.
-    """
-    state = client.run(
-        project_dir=str(_project(fixture.name)),
-        ref=branch,
-        namespace=namespace,
-        cache=_cache_mode(cache),
-    )
-    if str(state.job_status).lower() != "success":
-        raise RuntimeError(f"fixture run {state.job_id} on {branch} failed: {state.job_status}")
-
-    materialized = {table.name for table in client.get_tables(branch, filter_by_namespace=namespace)}
-    missing = set(fixture.tables) - materialized
-    if missing:
-        raise RuntimeError(f"fixture run left {branch}.{namespace} without: {', '.join(sorted(missing))}")
-
-
 def create_branch(client: bauplan.Client, branch: str, from_ref: str) -> str:
-    """Branch off a ref and return the new branch's name."""
+    """Branch off a ref and return the new branch's name.
+
+    A snapshot ref is `branch@hash`, which is what the SDK already means by a ref, so it needs no
+    unpacking here.
+    """
     client.create_branch(branch=branch, from_ref=from_ref)
     return branch
 
 
 def snapshot(client: bauplan.Client, branch: str) -> str:
-    """The branch's head commit, as `branch@hash`, which create_branch takes as it is."""
-    return f"{branch}@{client.get_branch(branch).hash}"
+    """The branch's head commit, which create_branch takes as it is."""
+    return pack_ref(branch, client.get_branch(branch).hash)
 
 
 def delete_branch(client: bauplan.Client, branch: str) -> None:
@@ -134,20 +125,31 @@ def overwrite_branch(client: bauplan.Client, source_ref: str, into_branch: str, 
             )
 
 
+def tables(client: bauplan.Client, branch: str, namespace: str) -> frozenset[str]:
+    """The tables the branch holds."""
+    return frozenset(table.name.lower() for table in client.get_tables(branch, filter_by_namespace=namespace))
+
+
 def run(client: bauplan.Client, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
-    """Apply the action's rewrite on the branch by running the target's project.
+    """Build the action on the branch by running its project.
 
     A run that fails is not an error the benchmark should stop for: writing something that does not
     build is one of the ways an attempt can be wrong, and such a step gets pruned like any other
     dead end. Only Bauplan's own failures are swallowed, so a broken client or bad credentials
     still surface instead of looking like a very unlucky agent.
     """
+    # A project named for the variant already is that variant; only one that serves both needs
+    # telling, so no project has to declare a parameter it never reads
+    project = _project(action.build, action.variant)
+    parameters = dict(action.params)
+    if action.variant and project.name == action.build:
+        parameters["variant"] = action.variant
     try:
         state = client.run(
-            project_dir=str(_project(action.builder or action.target)),
+            project_dir=str(project),
             ref=branch,
             namespace=namespace,
-            parameters={"variant": action.variant, **dict(action.params)},
+            parameters=parameters or None,
             cache=_cache_mode(cache),
         )
     except bauplan.exceptions.BauplanError:
@@ -155,26 +157,9 @@ def run(client: bauplan.Client, branch: str, namespace: str, action: Action, cac
     return str(state.job_status).lower() == "success"
 
 
-def evaluate(
-    client: bauplan.Client, branch: str, namespace: str, checks: Mapping[str, str], cache: bool = False
-) -> frozenset[str]:
-    """Run each target's check on the branch and return the ones that pass.
-
-    The workload supplies the SQL and this only reads the boolean it returns, so what counts as
-    correct never has to be known here. A target that never materialized, or whose check will not
-    typecheck against what it built, raises out of the query; that counts as not passing rather
-    than as a benchmark failure.
-    """
-    passing = set()
-    for target, sql in checks.items():
-        try:
-            result = client.query(sql, ref=branch, namespace=namespace, cache=_cache_mode(cache)).to_pylist()[0]
-        except bauplan.exceptions.BauplanError as e:
-            print(f"check for {target} on {branch} failed: {e}")
-            continue
-        if result["ok"]:
-            passing.add(target)
-    return frozenset(passing)
+def query(client: bauplan.Client, branch: str, namespace: str, statement: str, cache: bool = False) -> list[dict]:
+    """Read the branch."""
+    return client.query(statement, ref=branch, namespace=namespace, cache=_cache_mode(cache)).to_pylist()
 
 
 def read_across(
@@ -183,10 +168,13 @@ def read_across(
     """Read one table off many branches, one query per branch.
 
     A Bauplan query is scoped to a single ref, so there is no statement that spans branches: reading
-    N of them costs N round trips, which is exactly what this operation exists to measure.
+    N of them costs N round trips, which is exactly what this operation exists to measure. A branch
+    that never wrote the table has nothing to say rather than failing the read.
     """
-    return {
-        branch: client.query(f"SELECT * FROM {table}", ref=branch, namespace=namespace, cache=_cache_mode(cache))
-        .to_pylist()
-        for branch in branches
-    }
+    readings: dict[str, list[dict]] = {}
+    for branch in branches:
+        try:
+            readings[branch] = query(client, branch, namespace, f"SELECT * FROM {table}", cache)
+        except bauplan.exceptions.BauplanError:
+            readings[branch] = []
+    return readings

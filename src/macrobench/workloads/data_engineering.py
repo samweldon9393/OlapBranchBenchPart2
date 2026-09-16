@@ -13,7 +13,7 @@ from src.macrobench.experiment import Action, Fixture, Workload
 # computed from the untouched TPC-H tables rather than from the feeds, so reproducing it means the
 # drift was genuinely undone rather than agreed with.
 FIXTURE = Fixture(
-    name="de_fixture",
+    builds=(Action(target="de_fixture"),),
     tables=(
         "feed_americas",
         "feed_europe",
@@ -50,7 +50,8 @@ _STAGED_COLUMNS = """
 _UNIFIED_COLUMNS = f"{_STAGED_COLUMNS}, source"
 
 _REVENUE_COLUMNS = """
-    nation_name, order_quarter,
+    nation_name,
+    CAST(order_quarter AS DATE) AS order_quarter,
     CAST(net_revenue AS DECIMAL(38,2)) AS net_revenue,
     coalesce(CAST(tax_amount AS DECIMAL(38,2)), CAST(-1 AS DECIMAL(38,2))) AS tax_amount,
     order_count
@@ -90,7 +91,6 @@ def _comparison_sql(target: str) -> str:
 
 
 def choose_action(
-    workload: Workload,
     rng: random.Random,
     parent_state: frozenset[str],
     tried: frozenset[str],
@@ -106,21 +106,17 @@ def choose_action(
     unused here; this workload's choice depends only on what the parent already has.
     """
     attemptable = [
-        target
-        for target in workload.targets
-        if target not in parent_state and workload.dependencies[target] <= parent_state
+        target for target in TARGETS if target not in parent_state and DEPENDENCIES[target] <= parent_state
     ]
     if not attemptable:
         return None
-    return Action(target=rng.choice(attemptable), correct=rng.random() < p_correct)
+    return Action(target=rng.choice(attemptable), variant="correct" if rng.random() < p_correct else "broken")
 
 
 WORKLOAD = Workload(
     name="data_engineering",
     fixture=FIXTURE,
-    targets=TARGETS,
-    dependencies=DEPENDENCIES,
-    # One check per target, keyed by the target's own name
-    checks={target: {target: _comparison_sql(target)} for target in TARGETS},
+    # One check per target: whether it reproduces its gold table exactly
+    checks={target: {"matches_gold": _comparison_sql(target)} for target in TARGETS},
     choose_action=choose_action,
 )

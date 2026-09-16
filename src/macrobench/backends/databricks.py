@@ -2,8 +2,8 @@
 
 Branching is simulated as part 1 does it: Databricks has no database-level clone, so a branch is a
 new schema into which every table of the parent is SHALLOW CLONE'd, and deleting one is DROP SCHEMA
-CASCADE. A branch name here carries its catalog — `catalog.schema` — because the catalog is the
-only place the schema can live and nothing else in the run would otherwise know it.
+CASCADE. A branch name here carries its catalog — `catalog.schema` — because the catalog is the only
+place the schema can live and nothing else in the run would otherwise know it.
 
 Two things follow from a limitation Databricks genuinely has: a shallow clone cannot itself be
 shallow-cloned.
@@ -17,18 +17,22 @@ Anything deeper than one level is simply not available. A workload that branches
 data engineering chain — fails on its second step, and that is a fact about Databricks rather than
 something for this adapter to work around.
 
-The SQL is the same scripts Snowflake runs; the dialect-specific spellings were taken out of them
-so one set serves both.
+Running a build and reading a branch are shared with Snowflake, in backends/sql.py; everything this
+platform does differently is the DIALECT below.
 """
 
 import uuid
 from collections.abc import Mapping, Sequence
 
+# Imported here rather than lazily because it is what tells a failed build from a broken connection
+from databricks.sql.exc import Error as DatabricksError
+
 from src.branch.databricks import connect as open_connection
 from src.branch.databricks import list_tables, split_namespace
 from src.branch.sql import Connection, Cursor, ident
-from src.macrobench.backends.snowflake import _script, _statements
-from src.macrobench.experiment import Action, Fixture
+from src.macrobench.backends import sql
+from src.macrobench.backends.refs import pack_ref, unpack_ref
+from src.macrobench.experiment import Action
 
 # A branch is itself a schema here, so the namespace is fixed by the branch rather than named
 # separately. This is the schema of the usual base, kept only so the protocol has an answer.
@@ -40,7 +44,7 @@ def _schema(branch: str) -> tuple[str, str]:
     return split_namespace(branch)
 
 
-def _use(cursor: Cursor, branch: str) -> None:
+def _use(cursor: Cursor, branch: str, namespace: str) -> None:
     """Point the session at a branch.
 
     Scripts and checks are written against unqualified table names, so the session context is what
@@ -50,6 +54,32 @@ def _use(cursor: Cursor, branch: str) -> None:
     catalog, schema = _schema(branch)
     cursor.execute(f"USE CATALOG {catalog}")
     cursor.execute(f"USE SCHEMA {schema}")
+
+
+def _set_cache(cursor: Cursor, cache: bool) -> None:
+    """Databricks' spelling of the caching flag, passed explicitly on every step."""
+    cursor.execute(f"SET use_cached_result = {'true' if cache else 'false'}")
+
+
+def _qualify(branch: str, namespace: str, table: str) -> str:
+    """Name a table on a branch the session is not pointed at."""
+    catalog, schema = _schema(branch)
+    return f"{catalog}.{schema}.{ident(table)}"
+
+
+def _list_tables(cursor: Cursor, branch: str, namespace: str) -> frozenset[str]:
+    """The tables the branch's schema holds, lower-cased."""
+    catalog, schema = _schema(branch)
+    return frozenset(name.lower() for name in list_tables(cursor, catalog, schema))
+
+
+DIALECT = sql.Dialect(
+    failure=DatabricksError,
+    use=_use,
+    qualify=_qualify,
+    list_tables=_list_tables,
+    set_cache=_set_cache,
+)
 
 
 def connect() -> Connection:
@@ -62,6 +92,15 @@ def connect() -> Connection:
     warmup.execute("SELECT 1")
     warmup.fetchall()
     return connection
+
+
+def close(client: Connection) -> None:
+    """Close the warehouse connection.
+
+    A run opens one per worker; left to the garbage collector they are still being closed as the
+    interpreter shuts down, by which point the connector's transport can already be gone.
+    """
+    client.close()
 
 
 def _clone_tables(
@@ -97,15 +136,6 @@ def _version(cursor: Cursor, table: str) -> int:
     return int(str(row[0]))
 
 
-def close(client: Connection) -> None:
-    """Close the warehouse connection.
-
-    A run opens one per worker; left to the garbage collector they are still being closed as the
-    interpreter shuts down, by which point the connector's transport can already be gone.
-    """
-    client.close()
-
-
 def create_root_branch(client: Connection, base_branch: str) -> str:
     """Deep clone the base schema into the run's root and return its catalog.schema.
 
@@ -121,30 +151,13 @@ def create_root_branch(client: Connection, base_branch: str) -> str:
     return root_branch
 
 
-def materialize_fixture(
-    client: Connection, branch: str, namespace: str, fixture: Fixture, cache: bool = False
-) -> None:
-    """Build the workload's fixture on the branch, and check it left the tables it owes."""
-    cursor = client.cursor()
-    _use(cursor, branch)
-    for statement in _statements(_script(fixture.name), {}):
-        cursor.execute(statement)
-
-    catalog, schema = _schema(branch)
-    materialized = {name.strip("`").lower() for name in list_tables(cursor, catalog, schema)}
-    missing = {table for table in fixture.tables if table.lower() not in materialized}
-    if missing:
-        raise RuntimeError(f"fixture run left {branch} without: {', '.join(sorted(missing))}")
-
-
 def create_branch(client: Connection, branch: str, from_ref: str) -> str:
     """Shallow clone every table of the parent schema into a new one. Exactly part 1's create.
 
-    From a snapshot (`catalog.schema@table=version,...`) each table is cloned at its recorded version
-    instead. Those are still clones of the source's own tables, so the branch is one level deep like
-    any other.
+    From a snapshot each table is cloned at its recorded version instead. Those are still clones of
+    the source's own tables, so the branch is one level deep like any other.
     """
-    source, _, at = from_ref.partition("@")
+    source, at = unpack_ref(from_ref)
     versions = {ident(table): int(version) for table, version in (p.split("=") for p in at.split(","))} if at else None
     catalog, schema = _schema(branch)
     cursor = client.cursor()
@@ -154,7 +167,7 @@ def create_branch(client: Connection, branch: str, from_ref: str) -> str:
 
 
 def snapshot(client: Connection, branch: str) -> str:
-    """The schema as it stands now, as `catalog.schema@table=version,...`, for create_branch to clone.
+    """The schema as it stands now: the version of every table in it.
 
     Delta keeps history per table rather than per schema, so no single point names the whole branch;
     the latest version of every table, taken together, is the ref.
@@ -164,7 +177,7 @@ def snapshot(client: Connection, branch: str) -> str:
     versions = [
         (table, _version(cursor, f"{catalog}.{schema}.{table}")) for table in list_tables(cursor, catalog, schema)
     ]
-    return f"{branch}@{','.join(f'{table}={version}' for table, version in versions)}"
+    return pack_ref(branch, ",".join(f"{table}={version}" for table, version in versions))
 
 
 def delete_branch(client: Connection, branch: str) -> None:
@@ -208,66 +221,23 @@ def overwrite_branch(client: Connection, source_ref: str, into_branch: str, name
     merge_branch(client, source_ref, into_branch)
 
 
+def tables(client: Connection, branch: str, namespace: str) -> frozenset[str]:
+    """The tables the branch holds."""
+    return sql.tables(client, DIALECT, branch, namespace)
+
+
 def run(client: Connection, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
-    """Apply the action's rewrite on the branch by running the target's script.
-
-    A script that fails is not an error the benchmark should stop for: writing something that does
-    not build is one of the ways an attempt can be wrong, and such a step gets pruned like any other
-    dead end.
-    """
-    from databricks.sql.exc import Error as DatabricksError
-
-    try:
-        cursor = client.cursor()
-        _use(cursor, branch)
-        script = _script(action.builder) if action.builder else _script(action.target, action.variant)
-        for statement in _statements(script, dict(action.params)):
-            cursor.execute(statement)
-    except DatabricksError:
-        return False
-    return True
+    """Build the action on the branch by running its script."""
+    return sql.run(client, DIALECT, branch, namespace, action, cache)
 
 
-def evaluate(
-    client: Connection, branch: str, namespace: str, checks: Mapping[str, str], cache: bool = False
-) -> frozenset[str]:
-    """Run each target's check on the branch and return the ones that pass."""
-    from databricks.sql.exc import Error as DatabricksError
-
-    cursor = client.cursor()
-    _use(cursor, branch)
-
-    passing = set()
-    for target, sql in checks.items():
-        try:
-            cursor.execute(sql)
-            row = cursor.fetchone()
-        except DatabricksError as error:
-            print(f"check for {target} on {branch} failed: {error}")
-            continue
-        if row is not None and row[0]:
-            passing.add(target)
-    return frozenset(passing)
+def query(client: Connection, branch: str, namespace: str, statement: str, cache: bool = False) -> list[dict]:
+    """Read the branch."""
+    return sql.query(client, DIALECT, branch, namespace, statement, cache)
 
 
 def read_across(
     client: Connection, branches: Sequence[str], namespace: str, table: str, cache: bool = False
 ) -> dict[str, list[dict]]:
-    """Read one table off many branches in a single statement.
-
-    Each branch is a schema in the same catalog, so their copies of a table can be unioned directly.
-    """
-    readings: dict[str, list[dict]] = {branch: [] for branch in branches}
-    if not branches:
-        return readings
-    parts = []
-    for branch in branches:
-        catalog, schema = _schema(branch)
-        parts.append(f"SELECT '{catalog}.{schema}' AS branch_name__, * FROM {catalog}.{schema}.{ident(table)}")
-    cursor = client.cursor()
-    cursor.execute(" UNION ALL ".join(parts))
-    columns = [str(column[0]).lower() for column in cursor.description]
-    for row in cursor.fetchall():
-        record = dict(zip(columns, row, strict=True))
-        readings[record.pop("branch_name__")].append(record)
-    return readings
+    """Read one table off many branches in a single statement."""
+    return sql.read_across(client, DIALECT, branches, namespace, table, cache)

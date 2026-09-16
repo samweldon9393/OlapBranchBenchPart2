@@ -9,55 +9,62 @@
 --   restore    take each line's discount from source
 -- The mart and the recomputations are then rebuilt, and fix_metrics records how many rows outside
 -- the culprit the strategy rewrote.
-CREATE OR REPLACE TABLE replay_raw AS
-WITH replayed AS (
-    SELECT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate,
-           CAST((EXTRACT(YEAR FROM l_shipdate) - 1992) * 12 + EXTRACT(MONTH FROM l_shipdate) - 1 AS INT) AS batch_id
-    FROM lineitem
-    WHERE l_shipdate >= CAST('{start}' AS DATE) AND l_shipdate < CAST('{end}' AS DATE)
-)
+--
+-- Each strategy is one arm of a union guarded by a constant: after the parameters are filled in the
+-- guard reads 'dedupe' = 'filter', which both engines fold away, so only the arm that was chosen
+-- runs. That is SQL's way of writing the `if` the Bauplan project writes in Python.
+--
+-- The replayed rows are read back off li_raw rather than staged in a table of their own: every batch
+-- from the culprit onwards is exactly what this repair just appended.
+INSERT INTO li_raw
 SELECT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice,
        CASE WHEN batch_id = {culprit} AND '{kind}' = 'discount' AND l_shipdate < CAST('{cut}' AS DATE)
-            THEN 0 ELSE l_discount END AS l_discount,
+            THEN 0 ELSE l_discount END,
        l_shipdate, batch_id
-FROM replayed
+FROM (
+    SELECT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate,
+           CAST((EXTRACT(YEAR FROM l_shipdate) - {first_year}) * 12 + EXTRACT(MONTH FROM l_shipdate) - 1 AS INT)
+               AS batch_id
+    FROM lineitem
+    WHERE l_shipdate >= CAST('{start}' AS DATE) AND l_shipdate < CAST('{end}' AS DATE)
+) replayed
 UNION ALL
-SELECT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate, batch_id
-FROM replayed
-WHERE batch_id = {culprit} AND '{kind}' = 'duplicate'
+-- The culprit's batch is the first month replayed, so its defects are a plain date range
+SELECT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate, {culprit}
+FROM lineitem
+WHERE '{kind}' = 'duplicate'
+  AND l_shipdate >= CAST('{start}' AS DATE) AND l_shipdate < CAST('{culprit_end}' AS DATE)
 UNION ALL
-SELECT -l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate, batch_id
-FROM replayed
-WHERE batch_id = {culprit} AND '{kind}' = 'unbooked' AND l_linenumber = 1;
-
-INSERT INTO li_raw SELECT * FROM replay_raw;
+SELECT -l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate, {culprit}
+FROM lineitem
+WHERE '{kind}' = 'unbooked' AND l_linenumber = 1
+  AND l_shipdate >= CAST('{start}' AS DATE) AND l_shipdate < CAST('{culprit_end}' AS DATE);
 
 INSERT INTO li_clean
 SELECT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate, batch_id
-FROM replay_raw
-WHERE batch_id < {scope_lo} OR batch_id > {scope_hi}
+FROM li_raw
+WHERE batch_id >= {culprit} AND (batch_id < {scope_lo} OR batch_id > {scope_hi})
 UNION ALL
 SELECT DISTINCT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate, batch_id
-FROM replay_raw
+FROM li_raw
 WHERE '{strategy}' = 'dedupe' AND batch_id BETWEEN {scope_lo} AND {scope_hi}
 UNION ALL
 SELECT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate,
-       CAST((EXTRACT(YEAR FROM l_shipdate) - 1992) * 12 + EXTRACT(MONTH FROM l_shipdate) - 1 AS INT)
+       CAST((EXTRACT(YEAR FROM l_shipdate) - {first_year}) * 12 + EXTRACT(MONTH FROM l_shipdate) - 1 AS INT)
 FROM lineitem
 WHERE '{strategy}' = 'rederive'
   AND l_shipdate >= CAST('{start}' AS DATE) AND l_shipdate < CAST('{scope_end}' AS DATE)
 UNION ALL
-SELECT r.l_orderkey, r.l_partkey, r.l_suppkey, r.l_linenumber, r.l_extendedprice, r.l_discount, r.l_shipdate,
-       r.batch_id
-FROM replay_raw r
-JOIN orders o ON r.l_orderkey = o.o_orderkey
-JOIN part p ON r.l_partkey = p.p_partkey
-JOIN supplier s ON r.l_suppkey = s.s_suppkey
-WHERE '{strategy}' = 'filter' AND r.batch_id BETWEEN {scope_lo} AND {scope_hi}
+SELECT l_orderkey, l_partkey, l_suppkey, l_linenumber, l_extendedprice, l_discount, l_shipdate, batch_id
+FROM li_raw
+WHERE '{strategy}' = 'filter' AND batch_id BETWEEN {scope_lo} AND {scope_hi}
+  AND l_orderkey IN (SELECT o_orderkey FROM orders)
+  AND l_partkey IN (SELECT p_partkey FROM part)
+  AND l_suppkey IN (SELECT s_suppkey FROM supplier)
 UNION ALL
 SELECT r.l_orderkey, r.l_partkey, r.l_suppkey, r.l_linenumber, r.l_extendedprice,
        coalesce(s.l_discount, r.l_discount), r.l_shipdate, r.batch_id
-FROM replay_raw r
+FROM li_raw r
 LEFT JOIN lineitem s ON s.l_orderkey = r.l_orderkey AND s.l_linenumber = r.l_linenumber
 WHERE '{strategy}' = 'restore' AND r.batch_id BETWEEN {scope_lo} AND {scope_hi};
 
@@ -70,13 +77,13 @@ GROUP BY s.s_nationkey, l.batch_id;
 CREATE OR REPLACE TABLE revenue_recheck AS
 SELECT s.s_nationkey AS nation_key, SUM(l.l_extendedprice * (1 - l.l_discount)) AS revenue
 FROM lineitem l JOIN supplier s ON l.l_suppkey = s.s_suppkey
-WHERE l.l_shipdate <= (SELECT max(l_shipdate) FROM li_raw)
+WHERE l.l_shipdate < CAST('{loaded_end}' AS DATE)
 GROUP BY s.s_nationkey;
 
 CREATE OR REPLACE TABLE lines_recheck AS
 SELECT l_orderkey AS order_key, count(*) AS line_count
 FROM lineitem
-WHERE l_shipdate <= (SELECT max(l_shipdate) FROM li_raw)
+WHERE l_shipdate < CAST('{loaded_end}' AS DATE)
 GROUP BY l_orderkey;
 
 -- Every row in scope is rewritten, as a partition rewrite does, so the rows disturbed are the ones
@@ -84,7 +91,5 @@ GROUP BY l_orderkey;
 CREATE OR REPLACE TABLE fix_metrics AS
 SELECT '{strategy}' AS repair_strategy, '{scope}' AS repair_scope,
        count(*) AS disturbed_rows, -count(*) AS score
-FROM replay_raw
-WHERE batch_id BETWEEN {scope_lo} AND {scope_hi} AND batch_id <> {culprit};
-
-DROP TABLE replay_raw
+FROM li_raw
+WHERE batch_id BETWEEN {scope_lo} AND {scope_hi} AND batch_id <> {culprit}

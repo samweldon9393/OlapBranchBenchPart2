@@ -23,6 +23,7 @@ class Node:
     parent: "Node | None"
     depth: int
     state: frozenset[str]  # targets built and passing on this branch
+    step: int = -1  # the step that committed it, or -1 for the root; only the log reads it
     slots_used: int = 0  # children claimed, whether in flight or committed
     tried: set[str] = field(default_factory=set)  # targets ever attempted off this branch, kept or not
 
@@ -77,7 +78,6 @@ class Tree:
                 self.rng.shuffle(parents)
                 for parent in parents:
                     action = self.workload.choose_action(
-                        self.workload,
                         self.rng,
                         parent.state,
                         frozenset(parent.tried),
@@ -95,7 +95,11 @@ class Tree:
                 self.cond.wait()
 
     def finish(self, parent: Node, child: Node | None) -> None:
-        """Release a step. A committed child joins the tree; a rejected one frees its parent's slot."""
+        """Release a step. A committed child joins the tree; a rejected one frees its parent's slot.
+
+        Every successful claim has to reach exactly one finish, on every path including one that
+        raises: a slot still held is a worker waiting on a notify that never comes.
+        """
         with self.cond:
             if child is not None:
                 self.nodes.append(child)

@@ -1,3 +1,9 @@
 project:
   id: 7d1f3a92-6c4b-4e1a-9f2d-3b8c5e0a7f14
   name: macrobench_fix_fixture
+
+parameters:
+  base_end:
+    default: "1994-01-01"
+  first_year:
+    default: "1992"

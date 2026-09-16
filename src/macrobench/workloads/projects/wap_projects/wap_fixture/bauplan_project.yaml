@@ -1,3 +1,9 @@
 project:
   id: 706cc33b-2012-449d-8e6b-84f069d51772
   name: macrobench_wap_fixture
+
+parameters:
+  defect_modulus:
+    default: "97"
+  orphan_key:
+    default: "999"

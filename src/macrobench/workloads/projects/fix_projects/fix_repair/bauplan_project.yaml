@@ -3,9 +3,7 @@ project:
   name: macrobench_fix_repair
 
 parameters:
-  variant:
-    default: correct
-  commit:
+  snapshot:
     default: "0"
   strategy:
     default: dedupe
@@ -21,9 +19,15 @@ parameters:
     default: "1994-02-01"
   start:
     default: "1994-01-01"
+  culprit_end:
+    default: "1994-02-01"
   end:
+    default: "1994-02-01"
+  loaded_end:
     default: "1994-02-01"
   cut:
     default: "1994-01-11"
   kind:
     default: duplicate
+  first_year:
+    default: "1992"

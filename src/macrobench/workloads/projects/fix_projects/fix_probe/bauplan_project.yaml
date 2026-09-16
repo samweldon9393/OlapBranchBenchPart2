@@ -3,9 +3,9 @@ project:
   name: macrobench_fix_probe
 
 parameters:
-  variant:
-    default: correct
-  commit:
+  snapshot:
     default: "0"
   kind:
     default: duplicate
+  loaded_end:
+    default: "1994-01-01"

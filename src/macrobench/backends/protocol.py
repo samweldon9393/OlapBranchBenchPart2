@@ -2,32 +2,33 @@
 
 Part 1 reduced a backend to five closures handed to a generic driver. The workloads here need a
 richer surface than that — they build tables and check them, not just branches — so the contract is
-a Protocol instead, and each backend module satisfies it structurally. This shared
-interface exposes the primitives necessary for the fundamental "branch/run/evaluate/prune"
-loop that characterizes the agentic workloads this benchmark attempts to approximate.
-The workload code then talks only to this interface, and adding a backend means adding a module and
-a registry entry rather than touching the loop.
+a Protocol instead, and each backend module satisfies it structurally. This shared interface exposes
+the primitives necessary for the fundamental "branch/run/evaluate/prune" loop that characterizes the
+agentic workloads this benchmark attempts to approximate. The workload code then talks only to this
+interface, and adding a backend means adding a module and a registry entry rather than touching the
+loop.
+
+Nothing here knows which workload is running: what to set up and what counts as correct arrive as
+arguments. Building the fixture and judging a branch are not operations of their own — setup runs
+its builds through `run` like any step, and the driver reads each check's `ok` through `query` — so
+a backend says only how its platform does a thing, never when.
 
 The client is deliberately opaque: the workload only ever receives one and hands it back, so what
 it actually is stays the backend's business.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Protocol
 
-from src.branch.cli import Backend
+from src.common.backend import Backend
 from src.macrobench.backends import bauplan as bauplan_backend
 from src.macrobench.backends import databricks as databricks_backend
 from src.macrobench.backends import snowflake as snowflake_backend
-from src.macrobench.experiment import Action, Fixture
+from src.macrobench.experiment import Action
 
 
 class MacroBackend(Protocol):
-    """What a backend must expose to run an end-to-end workload against it.
-
-    Nothing here knows which workload is running: what to set up and what counts as correct arrive
-    as arguments, so the same operations serve all four.
-    """
+    """What a backend must expose to run an end-to-end workload against it."""
 
     # Where this backend keeps the TPC-H tables. Each spells it differently — a Bauplan namespace, a
     # Snowflake schema — so a run that does not name one asks the backend rather than assuming.
@@ -46,12 +47,6 @@ class MacroBackend(Protocol):
         """Create the root branch off the base ref and return its name."""
         ...
 
-    def materialize_fixture(
-        self, client: object, branch: str, namespace: str, fixture: Fixture, cache: bool = False
-    ) -> None:
-        """Build the workload's fixture on the branch, and check it left the tables it owes."""
-        ...
-
     def create_branch(self, client: object, branch: str, from_ref: str) -> str:
         """Branch off a ref — a branch, or a snapshot of one — and return the new branch's name."""
         ...
@@ -66,8 +61,24 @@ class MacroBackend(Protocol):
         """Delete a branch."""
         ...
 
+    def tables(self, client: object, branch: str, namespace: str) -> frozenset[str]:
+        """The tables a branch holds, lower-cased so the names compare across platforms."""
+        ...
+
+    def run(self, client: object, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
+        """Build the action on the branch, reporting whether it built.
+
+        A build that fails is not an error the benchmark stops for: writing something that does not
+        build is one of the ways an attempt can be wrong. Only the platform's own failures are
+        swallowed, so a broken client or bad credentials still surface."""
+        ...
+
+    def query(self, client: object, branch: str, namespace: str, sql: str, cache: bool = False) -> list[dict]:
+        """Read a branch, returning rows as dicts with lower-cased column names."""
+        ...
+
     def merge_branch(self, client: object, source_ref: str, into_branch: str) -> None:
-        """Merge a branch back into another one."""
+        """Merge a branch back into another one, raising where the platform cannot."""
         ...
 
     def overwrite_branch(self, client: object, source_ref: str, into_branch: str, namespace: str) -> None:
@@ -77,16 +88,6 @@ class MacroBackend(Protocol):
         changed the same tables."""
         ...
 
-    def run(self, client: object, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
-        """Apply the action's rewrite on the branch, reporting whether it built."""
-        ...
-
-    def evaluate(
-        self, client: object, branch: str, namespace: str, checks: Mapping[str, str], cache: bool = False
-    ) -> frozenset[str]:
-        """Run each target's check SQL on the branch and return the targets whose `ok` came back true."""
-        ...
-
     def read_across(
         self, client: object, branches: Sequence[str], namespace: str, table: str, cache: bool = False
     ) -> dict[str, list[dict]]:
@@ -94,7 +95,8 @@ class MacroBackend(Protocol):
 
         How many round trips that takes is each backend's own business, and is the point of timing
         it: where a branch is a database or a schema they can be unioned in one statement, whereas a
-        query scoped to a single ref has to visit every branch in turn."""
+        query scoped to a single ref has to visit every branch in turn. Every branch asked for
+        appears in the result; one that does not carry the table maps to no rows."""
         ...
 
 
@@ -103,11 +105,3 @@ BACKENDS: dict[Backend, MacroBackend] = {
     Backend.snowflake: snowflake_backend,
     Backend.databricks: databricks_backend,
 }
-
-
-def resolve(backend: Backend) -> MacroBackend:
-    """Look up the implementation for a backend, or say plainly that it does not have one yet."""
-    try:
-        return BACKENDS[backend]
-    except KeyError:
-        raise NotImplementedError(f"the macrobenchmark is not implemented for {backend} yet") from None

@@ -5,17 +5,17 @@ loads the next month's batch wrong, and a run of good commits follows it, a mont
 bad one is wrong is the run's kind — a batch loaded twice, discounts dropped on part of it, or lines
 for orders that were never booked — and all three overstate revenue by supplier nation.
 
-Phase 1 finds it. Each probe branches off one of the root's past commits, newest first, recomputes
-revenue and line counts from source over what that commit had loaded, and checks the mart against
-them. Every probe back to the culprit fails and is discarded; the first to hold is the last good
-state, and is kept.
+Phase 1 finds it. Each probe branches off one of the root's past states, newest first, recomputes
+revenue and line counts from source over the months that state had loaded, and checks the mart
+against them. Every probe back to the culprit fails and is discarded; the first to hold is the last
+good state, and is kept.
 
 Phase 2 fixes it from that last good state. Each candidate replays the culprit and every commit after
 it the way they were made, applying one repair strategy over one scope as it goes, and records how
 many rows outside the culprit it rewrote. Those that restore the invariants survive, and the least
 disturbing is published over the root.
 
-Nothing here is random: which commit to probe and which repair to try next follow a fixed order, so
+Nothing here is random: which state to probe and which repair to try next follow a fixed order, so
 a run takes the same steps at any worker count.
 """
 
@@ -23,7 +23,7 @@ import random
 from datetime import date, timedelta
 from enum import StrEnum
 
-from src.macrobench.experiment import Action, Fixture, Workload
+from src.macrobench.experiment import Action, ChooseAction, Fixture, Workload
 
 
 class Kind(StrEnum):
@@ -64,7 +64,6 @@ def _commit(batch: int, kind: Kind, bad: bool) -> Action:
     start = _start(batch)
     return Action(
         target=f"commit_{batch}",
-        correct=True,
         builder="fix_commit",
         params=(
             ("batch", str(batch)),
@@ -77,82 +76,91 @@ def _commit(batch: int, kind: Kind, bad: bool) -> Action:
     )
 
 
-def choose_action(
-    workload: Workload,
-    rng: random.Random,
-    parent_state: frozenset[str],
-    tried: frozenset[str],
-    step: int,
-    p_correct: float,
-) -> Action | None:
-    """Probe the root's history newest first, then try each repair off the commit that held.
+def _choose_action(history: tuple[Action, ...]) -> ChooseAction:
+    """Build the workload's decision function, which needs to know the history it is walking back."""
+    culprit_params = dict(history[0].params)
+    last_batch = int(dict(history[-1].params)["batch"])
 
-    Off the root, the next step probes the newest commit not yet probed. commits[0] is the fixture
-    itself, from before the bad commit, so the walk always ends by finding the last good state. A
-    probe that holds is kept, and its state names the commit it held at; off that probe, the next step
-    is the next repair in a fixed order. A repair branches from the probe's commit rather than from
-    the probe, which holds the same data but would make every repair a clone of a clone.
+    def choose_action(
+        rng: random.Random,
+        parent_state: frozenset[str],
+        tried: frozenset[str],
+        step: int,
+        p_correct: float,
+    ) -> Action | None:
+        """Probe the root's history newest first, then try each repair off the state that held.
 
-    Nothing is drawn from the RNG and p_correct is unused: whether a probe or a repair holds is down
-    to the data.
-    """
-    history = workload.fixture.commits
-    culprit = dict(history[0].params)
+        Off the root, the next step probes the newest state not yet probed. Snapshot 0 is the fixture
+        itself, from before the bad commit, so the walk always ends by finding the last good state. A
+        probe that holds is kept, and its state names the snapshot it held at; off that probe, the
+        next step is the next repair in a fixed order. A repair branches from the probe's snapshot
+        rather than from the probe, which holds the same data but would make every repair a clone of
+        a clone.
 
-    if not parent_state:
-        for commit in range(len(history), -1, -1):
-            if f"probe_{commit}" not in tried:
-                return Action(
-                    target=f"probe_{commit}",
-                    correct=True,
-                    builder="fix_probe",
-                    at_commit=commit,
-                    params=(("commit", str(commit)), ("kind", culprit["kind"])),
-                )
+        Nothing is drawn from the RNG and p_correct is unused: whether a probe or a repair holds is
+        down to the data.
+        """
+        if not parent_state:
+            for snapshot in range(len(history), -1, -1):
+                if f"probe_{snapshot}" not in tried:
+                    return Action(
+                        target=f"probe_{snapshot}",
+                        builder="fix_probe",
+                        from_snapshot=snapshot,
+                        params=(
+                            ("snapshot", str(snapshot)),
+                            ("kind", culprit_params["kind"]),
+                            # Everything loaded by that state: the base months, plus a month per commit
+                            ("loaded_end", _start(CULPRIT + snapshot).isoformat()),
+                        ),
+                    )
+            return None
+
+        (probe,) = parent_state
+        good = int(probe.removeprefix("probe_"))
+        # The commit right after the last good state is the culprit, and every one after it is replayed
+        culprit = dict(history[good].params)
+        first = int(culprit["batch"])
+        for target in REPAIRS:
+            if target in tried:
+                continue
+            strategy, scope = target.split("@")
+            high = {"batch": first, "quarter": min(first - first % 3 + 2, last_batch), "all": last_batch}[scope]
+            return Action(
+                target=target,
+                builder="fix_repair",
+                from_snapshot=good,
+                params=(
+                    ("snapshot", str(good)),
+                    ("strategy", strategy),
+                    ("scope", scope),
+                    ("culprit", str(first)),
+                    ("scope_lo", str(first)),
+                    ("scope_hi", str(high)),
+                    ("scope_end", _start(high + 1).isoformat()),
+                    ("start", culprit["start"]),
+                    ("culprit_end", culprit["end"]),
+                    ("end", _start(last_batch + 1).isoformat()),
+                    # The replay ends where the head does, so that is everything loaded
+                    ("loaded_end", _start(last_batch + 1).isoformat()),
+                    ("cut", culprit["cut"]),
+                    ("kind", culprit["kind"]),
+                    ("first_year", str(FIRST_YEAR)),
+                ),
+            )
         return None
 
-    (probe,) = parent_state
-    good = int(probe.removeprefix("probe_"))
-    # The commit right after the last good state is the culprit, and every one after it is replayed
-    culprit = dict(history[good].params)
-    first, last = int(culprit["batch"]), int(dict(history[-1].params)["batch"])
-    for target in REPAIRS:
-        if target in tried:
-            continue
-        strategy, scope = target.split("@")
-        high = {"batch": first, "quarter": min(first - first % 3 + 2, last), "all": last}[scope]
-        return Action(
-            target=target,
-            correct=True,
-            builder="fix_repair",
-            at_commit=good,
-            params=(
-                ("commit", str(good)),
-                ("strategy", strategy),
-                ("scope", scope),
-                ("culprit", str(first)),
-                ("scope_lo", str(first)),
-                ("scope_hi", str(high)),
-                ("scope_end", _start(high + 1).isoformat()),
-                ("start", culprit["start"]),
-                ("end", _start(last + 1).isoformat()),
-                ("cut", culprit["cut"]),
-                ("kind", culprit["kind"]),
-            ),
-        )
-    return None
+    return choose_action
 
 
 # The mart against revenue recomputed from source over the same months. Every kind overstates it.
-# Bauplan keeps money as floating point, so equality is to within a unit of currency rather than
-# exact; each kind of defect moves a nation's total by far more than that.
 _REVENUE = """
     WITH mart AS (SELECT nation_key, SUM(revenue) AS revenue FROM revenue_mart GROUP BY nation_key),
          gaps AS (
              SELECT abs(coalesce(m.revenue, 0) - coalesce(r.revenue, 0)) AS gap
              FROM mart m FULL OUTER JOIN revenue_recheck r ON m.nation_key = r.nation_key
          )
-    SELECT coalesce(max(gap), 0) < 1 AS ok FROM gaps
+    SELECT coalesce(max(gap), 0) = 0 AS ok FROM gaps
 """
 
 # Lines per order against source over the same months, which catches a batch loaded twice and lines
@@ -183,21 +191,28 @@ CHECKS = {"revenue": _REVENUE, "line_counts": _LINE_COUNTS, "ref_integrity": _RE
 def workload(kind: Kind, commits: int) -> Workload:
     """The fixing workload for one kind of bad commit, with `commits` good ones made on top of it.
 
-    Built per run rather than once, since how many commits there are to probe is the run's to choose.
+    Built per run rather than once, since how much history there is to probe is the run's to choose.
     """
     history = (_commit(CULPRIT, kind, bad=True),) + tuple(
         _commit(CULPRIT + i, kind, bad=False) for i in range(1, commits + 1)
     )
-    targets = tuple(f"probe_{commit}" for commit in range(commits + 2)) + REPAIRS
     return Workload(
         name="fixing",
-        fixture=Fixture(name="fix_fixture", tables=("li_raw", "li_clean", "revenue_mart"), commits=history),
-        targets=targets,
-        dependencies=dict.fromkeys(targets, frozenset()),
+        # The fixture loads the base months; the commits are the history the probes walk back through
+        fixture=Fixture(
+            builds=(
+                Action(
+                    target="fix_fixture",
+                    params=(("base_end", _start(BASE_BATCHES).isoformat()), ("first_year", str(FIRST_YEAR))),
+                ),
+                *history,
+            ),
+            tables=("li_raw", "li_clean", "revenue_mart"),
+        ),
         # The same invariants judge every step: a probe holds when they do, and a repair has to
         # restore them
-        checks=dict.fromkeys(targets, CHECKS),
-        choose_action=choose_action,
+        invariants=CHECKS,
+        choose_action=_choose_action(history),
         rank_by=("fix_metrics", "score"),
         overwrite_on_publish=True,
     )
