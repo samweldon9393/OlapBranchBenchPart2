@@ -18,9 +18,17 @@ TABLES = ("region", "nation", "customer", "supplier", "part", "partsupp", "order
 
 TARGETS = tuple(f"landed_{table}" for table in TABLES)
 
+# A row is corrupt when its primary key is a multiple of this. 97 is prime and so coprime with the
+# period of the TPC-H key generators, which spreads the defects evenly through each table and keeps
+# the same rows corrupt every time the fixture is rebuilt.
+DEFECT_MODULUS = 97
+
+# The foreign key an orphaned row is pointed at, deliberately outside the real key ranges: regions
+# are 0-4 and nations 0-24
+ORPHAN_KEY = 999
+
 
 def choose_action(
-    workload: Workload,
     rng: random.Random,
     parent_state: frozenset[str],
     tried: frozenset[str],
@@ -35,7 +43,9 @@ def choose_action(
     """
     if step >= len(TABLES):
         return None
-    return Action(target=f"landed_{TABLES[step]}", correct=rng.random() < p_correct)
+    return Action(
+        target=f"landed_{TABLES[step]}", variant="correct" if rng.random() < p_correct else "broken"
+    )
 
 
 # One audit per table, each asking the single question that table's defect would fail. They run
@@ -81,10 +91,15 @@ WORKLOAD = Workload(
     name="wap",
     # The fixture leaves a corrupted counterpart for every table, so a step has something to draw
     # when its luck runs out
-    fixture=Fixture(name="wap_fixture", tables=tuple(f"bad_{table}" for table in TABLES)),
-    targets=TARGETS,
-    # Every table is ingested on its own, so no step waits on another
-    dependencies=dict.fromkeys(TARGETS, frozenset()),
+    fixture=Fixture(
+        builds=(
+            Action(
+                target="wap_fixture",
+                params=(("defect_modulus", str(DEFECT_MODULUS)), ("orphan_key", str(ORPHAN_KEY))),
+            ),
+        ),
+        tables=tuple(f"bad_{table}" for table in TABLES),
+    ),
     checks=AUDITS,
     choose_action=choose_action,
 )

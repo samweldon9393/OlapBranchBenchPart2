@@ -30,6 +30,9 @@ def ds_features(
         pa.table({name: orders.column(name) for name in orders.column_names}),
         keys="l_orderkey",
         right_keys="o_orderkey",
+        # Stated rather than left to pyarrow's left-outer default, since the Snowflake side joins
+        # inner: a line whose order went missing should drop out on both backends
+        join_type="inner",
     )
 
     candidates = {
@@ -49,9 +52,10 @@ def ds_features(
 @bauplan.model(name="ds_metrics", materialization_strategy="REPLACE")
 @bauplan.python("3.12")
 def ds_metrics(
-    # Reading the feature table makes the metrics depend on it, so a row is only written for a
-    # feature table that actually built
-    built=bauplan.Model("ds_features", columns=["order_key"]),
+    # A run is all or nothing, so the metrics row cannot outlive a feature table that failed to
+    # build and nothing has to be read back to say so. Bauplan will not run a model without an
+    # input, and region is the smallest table there is.
+    anchor=bauplan.Model("region", columns=["r_regionkey"]),
     features=bauplan.Parameter("features"),
     model=bauplan.Parameter("model"),
     score=bauplan.Parameter("score"),

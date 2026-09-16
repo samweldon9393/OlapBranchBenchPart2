@@ -35,16 +35,23 @@ def revenue_by_nation_quarter(
             ),
             keys="cust_key",
             right_keys="c_custkey",
+            # Stated rather than left to pyarrow's left-outer default, since the SQL side says JOIN:
+            # an order whose customer went missing should drop out of the mart on every backend
+            join_type="inner",
         )
         .join(
             pa.table({"n_nationkey": nations.column("n_nationkey"), "n_name": nations.column("n_name")}),
             keys="c_nationkey",
             right_keys="n_nationkey",
+            join_type="inner",
         )
     )
 
     unit = "year" if variant == "broken" else "quarter"
-    order_quarter = pc.floor_temporal(pc.cast(joined.column("order_date"), pa.timestamp("us")), unit=unit)
+    # A date, as the SQL side's DATE_TRUNC gives, rather than the timestamp floor_temporal returns
+    order_quarter = pc.cast(
+        pc.floor_temporal(pc.cast(joined.column("order_date"), pa.timestamp("us")), unit=unit), pa.date32()
+    )
 
     aggregated = (
         pa.table(

@@ -11,12 +11,14 @@ from typing import Annotated
 
 import typer
 
-from src.branch.cli import Backend
-from src.macrobench.backends.protocol import resolve
+from src.common.backend import Backend
+from src.macrobench.backends.protocol import BACKENDS
 from src.macrobench.driver import run_workload
 from src.macrobench.experiment import MacrobenchConfig, Workload
 from src.macrobench.workloads.data_engineering import WORKLOAD as DATA_ENGINEERING
 from src.macrobench.workloads.data_science import WORKLOAD as DATA_SCIENCE
+from src.macrobench.workloads.fixing import CULPRIT, LAST_BATCH, Kind
+from src.macrobench.workloads.fixing import workload as fixing_workload
 from src.macrobench.workloads.wap import TABLES as WAP_TABLES
 from src.macrobench.workloads.wap import WORKLOAD as WAP
 
@@ -31,6 +33,9 @@ WAP_STEPS = len(WAP_TABLES)
 # Every node of the complete data science tree: 8 off the root, 3 off each of those, then the 2
 # features a depth-2 lineage has left. The tree ends when candidates run out, well before this.
 DS_STEPS = 8 + 8 * 3 + 8 * 3 * 2
+
+# Every good commit after the bad one is another month of TPC-H, and the months run out
+FIX_MAX_COMMITS = LAST_BATCH - CULPRIT
 
 BackendArg = Annotated[Backend, typer.Argument(help="Backend to benchmark")]
 BaseBranchArg = Annotated[str, typer.Argument(help="Ref / database / catalog.schema to branch from")]
@@ -50,6 +55,38 @@ MergeOnCommit = Annotated[
     bool, typer.Option(help="Merge each accepted branch into its parent instead of keeping it")
 ]
 ResultsPath = Annotated[Path, typer.Option(help="Cumulative results parquet")]
+
+
+def _config(
+    backend: Backend,
+    namespace: str | None,
+    seed: int,
+    cache: bool,
+    p_correct: float,
+    root_fanout: int,
+    inner_fanout: int,
+    max_depth: int,
+    max_steps: int,
+    n_workers: int,
+    merge_on_commit: bool,
+) -> MacrobenchConfig:
+    """The knobs every subcommand takes, in the shape the driver wants them.
+
+    The subcommands spell the options out themselves, since their defaults are the point; what they
+    do with them afterwards is the same everywhere.
+    """
+    return MacrobenchConfig(
+        seed=seed,
+        namespace=namespace or BACKENDS[backend].DEFAULT_NAMESPACE,
+        cache=cache,
+        p_correct=p_correct,
+        root_fanout=root_fanout,
+        inner_fanout=inner_fanout,
+        max_depth=max_depth,
+        max_steps=max_steps,
+        n_workers=n_workers,
+        merge_on_commit=merge_on_commit,
+    )
 
 
 def _run(
@@ -80,17 +117,9 @@ def data_engineering(
     A chain by default: one branch off the root, one off each branch after it, so accepted steps
     stack into a single deep line and the run publishes once at the end.
     """
-    config = MacrobenchConfig(
-        seed=seed,
-        namespace=namespace or resolve(backend).DEFAULT_NAMESPACE,
-        cache=cache,
-        p_correct=p_correct,
-        root_fanout=root_fanout,
-        inner_fanout=inner_fanout,
-        max_depth=max_depth,
-        max_steps=max_steps,
-        n_workers=n_workers,
-        merge_on_commit=merge_on_commit,
+    config = _config(
+        backend, namespace, seed, cache, p_correct, root_fanout, inner_fanout, max_depth, max_steps,
+        n_workers, merge_on_commit,
     )
     _run(DATA_ENGINEERING, backend, base_branch, config, results_path)
 
@@ -119,17 +148,9 @@ def wap(
     """
     if n_workers > WAP_STEPS:
         raise typer.BadParameter(f"at most {WAP_STEPS} workers, one per table", param_hint="--n-workers")
-    config = MacrobenchConfig(
-        seed=seed,
-        namespace=namespace or resolve(backend).DEFAULT_NAMESPACE,
-        cache=cache,
-        p_correct=p_correct,
-        root_fanout=root_fanout,
-        inner_fanout=inner_fanout,
-        max_depth=max_depth,
-        max_steps=max_steps,
-        n_workers=n_workers,
-        merge_on_commit=merge_on_commit,
+    config = _config(
+        backend, namespace, seed, cache, p_correct, root_fanout, inner_fanout, max_depth, max_steps,
+        n_workers, merge_on_commit,
     )
     _run(WAP, backend, base_branch, config, results_path)
 
@@ -162,16 +183,42 @@ def data_science(
             "feature table at 481s against 7s on Snowflake; this workload is not run there",
             param_hint="BACKEND",
         )
-    config = MacrobenchConfig(
-        seed=seed,
-        namespace=namespace or resolve(backend).DEFAULT_NAMESPACE,
-        cache=cache,
-        p_correct=p_correct,
-        root_fanout=root_fanout,
-        inner_fanout=inner_fanout,
-        max_depth=max_depth,
-        max_steps=max_steps,
-        n_workers=n_workers,
-        merge_on_commit=merge_on_commit,
+    config = _config(
+        backend, namespace, seed, cache, p_correct, root_fanout, inner_fanout, max_depth, max_steps,
+        n_workers, merge_on_commit,
     )
     _run(DATA_SCIENCE, backend, base_branch, config, results_path)
+
+
+@app.command("fixing")
+def fixing(
+    backend: BackendArg,
+    base_branch: BaseBranchArg,
+    kind: Annotated[Kind, typer.Option(help="How the bad commit loads its batch wrong")] = Kind.duplicate,
+    commits: Annotated[int, typer.Option(help="Good commits made on top of the bad one")] = 12,
+    seed: Seed = 0,
+    namespace: Namespace = None,
+    cache: Cache = False,
+    p_correct: PCorrect = 1.0,
+    root_fanout: RootFanout = 16,
+    inner_fanout: InnerFanout = 12,
+    max_depth: MaxDepth = 2,
+    max_steps: MaxSteps = 100,
+    n_workers: NWorkers = 8,
+    merge_on_commit: MergeOnCommit = False,
+    results_path: ResultsPath = RESULTS_PATH,
+) -> None:
+    """Find the commit that overstated a revenue mart, then try repairs and publish the best.
+
+    Two wide, flat bursts: probes of the root's past commits, newest first, until one holds; then a
+    dozen repairs off that last good state, the least disturbing of those that hold published over
+    the root. Nothing is random, so the seed and p_correct change nothing; they are taken so that
+    every workload accepts the same options.
+    """
+    if not 1 <= commits <= FIX_MAX_COMMITS:
+        raise typer.BadParameter(f"between 1 and {FIX_MAX_COMMITS}, the months TPC-H has left", param_hint="--commits")
+    config = _config(
+        backend, namespace, seed, cache, p_correct, root_fanout, inner_fanout, max_depth, max_steps,
+        n_workers, merge_on_commit,
+    )
+    _run(fixing_workload(kind, commits), backend, base_branch, config, results_path)

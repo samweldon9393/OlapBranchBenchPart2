@@ -26,7 +26,6 @@ MODELS = ("tree", "regression")
 # Off the root, a candidate is a model and a first feature: 2 x 4 = 8 branches. Below that, each
 # refinement adds one more feature, so a target there is just the feature it adds.
 ROOTS = tuple(f"{model}:{feature}" for model in MODELS for feature in FEATURES)
-TARGETS = ROOTS + FEATURES
 
 # Every attempt builds the same way — a feature table and a metrics row — and only its parameters
 # differ, so all of them run one builder rather than a project or script per target
@@ -47,7 +46,6 @@ def _lineage(state: frozenset[str]) -> tuple[str, list[str]]:
 
 
 def choose_action(
-    workload: Workload,
     rng: random.Random,
     parent_state: frozenset[str],
     tried: frozenset[str],
@@ -83,8 +81,6 @@ def choose_action(
     threshold = 1 - p_correct
     return Action(
         target=target,
-        # Nothing is ever built wrong here: whether a candidate survives is down to its score alone
-        correct=True,
         builder=BUILDER,
         params=(
             ("features", ",".join(sorted(features))),
@@ -102,11 +98,9 @@ SCORE_CHECK = "SELECT score >= {threshold} AND features = '{features}' AS ok FRO
 WORKLOAD = Workload(
     name="data_science",
     # The fixture seeds the catalogue of candidate features; everything else each branch builds itself
-    fixture=Fixture(name="ds_fixture", tables=("ds_candidates",)),
-    targets=TARGETS,
-    dependencies=dict.fromkeys(TARGETS, frozenset()),
-    # One check, whatever the target: every attempt is judged on its own score
-    checks={target: {"score": SCORE_CHECK} for target in TARGETS},
+    fixture=Fixture(builds=(Action(target="ds_fixture"),), tables=("ds_candidates",)),
+    # Every attempt is judged the same way, on its own score, whatever it built
+    invariants={"score": SCORE_CHECK},
     choose_action=choose_action,
     rank_by=("ds_metrics", "score"),
 )

@@ -230,7 +230,7 @@ Setup fails loudly if the fixture does not leave every table it owes. For data e
 
 ### What is measured
 
-Each timed operation appends one row: `create_branch`, `mutate`, `evaluate`, `delete_branch` and `merge_branch`, plus one `<workload>_workload` row covering the whole timed region so a run's end-to-end cost is queryable without re-adding the parts and the gaps between them.
+Each timed operation appends one row: `create_branch`, `run`, `evaluate`, `delete_branch`, `merge_branch` and `aggregate` (reading one table off every surviving branch), plus one `<workload>_workload` row covering the whole timed region so a run's end-to-end cost is queryable without re-adding the parts and the gaps between them.
 
 Everything around the loop is deliberately outside it — opening clients, cutting the root branch, building the fixture, and the teardown that deletes the run's branches afterwards. Branch names are built outside the measured region too, the same way part 1 does it.
 
@@ -238,6 +238,4 @@ Rows land in `results/macrobench.parquet` by default, carrying `backend`, `workl
 
 ### Status
 
-Implemented: the data engineering and WAP workloads, on Bauplan. Running either against `snowflake` or `databricks` raises `NotImplementedError` rather than pretending.
-
-Not yet done: the other two workloads (data science, fixing bad data), the Snowflake and Databricks adapters, and schema evolution as a step — every attempt currently changes values, not shapes. Databricks is expected to fail the chained workload at depth 2, since it does not allow chained shallow clones, which is a result about the platform rather than a hole in the harness. No results are published for part 2 yet.
+All four workloads — data engineering, WAP, data science and fixing — run on Bauplan, Snowflake and Databricks, with two exceptions that are facts about the platforms rather than holes in the harness. Databricks cannot branch off a branch, since a shallow clone cannot itself be shallow-cloned, so it fails the data engineering chain at depth 2. And data science is refused on Databricks outright: a SQL warehouse runs Python only one row at a time, which put a single feature table at 481s there against 7s on Snowflake.

@@ -3,8 +3,6 @@ project:
   name: macrobench_ds_features
 
 parameters:
-  variant:
-    default: correct
   features:
     default: ship_delay
   model:

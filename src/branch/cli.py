@@ -1,5 +1,4 @@
 from collections.abc import Callable
-from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -9,13 +8,7 @@ from src.branch.bauplan import create_branches as run_bauplan
 from src.branch.databricks import create_branches as run_databricks
 from src.branch.experiment import BranchConfig
 from src.branch.snowflake import create_branches as run_snowflake
-
-
-class Backend(StrEnum):
-    bauplan = "bauplan"
-    snowflake = "snowflake"
-    databricks = "databricks"
-
+from src.common.backend import Backend
 
 BACKENDS: dict[Backend, Callable[..., object]] = {
     Backend.bauplan: run_bauplan,

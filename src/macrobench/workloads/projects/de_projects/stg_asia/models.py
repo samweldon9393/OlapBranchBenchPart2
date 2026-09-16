@@ -18,23 +18,11 @@ def stg_asia(
     import pyarrow as pa
     import pyarrow.compute as pc
 
-    if variant == "broken":
-        rows = src
-    else:
-        # pyarrow has no drop-duplicates; grouping on the key and taking min() over identical
-        # copies is the same thing, and aggregate names its outputs <column>_min
-        deduped = src.group_by(["o_orderkey"]).aggregate(
-            [("o_custkey", "min"), ("o_orderdate", "min"), ("o_totalprice", "min"), ("o_tax", "min")]
-        )
-        rows = pa.table(
-            {
-                "o_orderkey": deduped.column("o_orderkey"),
-                "o_custkey": deduped.column("o_custkey_min"),
-                "o_orderdate": deduped.column("o_orderdate_min"),
-                "o_totalprice": deduped.column("o_totalprice_min"),
-                "o_tax": deduped.column("o_tax_min"),
-            }
-        )
+    # The feed repeats rows verbatim, so the correct reading collapses identical rows of the feed
+    # before anything downstream counts them — grouping on every column with no aggregate is
+    # pyarrow's distinct. Collapsing the feed rather than the output is what the SQL side does too,
+    # so a feed row that ever differed in a column other than the key would be kept by both.
+    rows = src if variant == "broken" else src.group_by(src.column_names).aggregate([])
 
     # "totalprice" is the fully loaded price the way TPC-H defines it, so tax comes back out
     net_price = pc.subtract(rows.column("o_totalprice"), rows.column("o_tax"))
