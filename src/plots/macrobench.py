@@ -82,6 +82,20 @@ def load(results_path: str | Path) -> pl.DataFrame:
     return frame
 
 
+def workloads(frame: pl.DataFrame) -> list[str]:
+    """The workloads a results file holds."""
+    return sorted(frame["workload"].unique().to_list())
+
+
+def only(frame: pl.DataFrame, workload: str) -> pl.DataFrame:
+    """One workload's rows.
+
+    The name is taken as the results spell it or as its subcommand does, so `data-engineering` and
+    `data_engineering` both find the same rows.
+    """
+    return frame.filter(pl.col("workload") == workload.replace("-", "_"))
+
+
 def wall_clock(frame: pl.DataFrame) -> pl.DataFrame:
     """End-to-end seconds per workload and backend, averaged over the runs in the file."""
     return (
@@ -251,16 +265,22 @@ def plot_by_operation(breakdown: pl.DataFrame, out_path: Path, theme: Theme) -> 
         axes.text(left + longest * 0.012, index, f"{totals[(workload, backend)]:,.0f}s of work",
                   va="center", ha="left", fontsize=9, color=theme.secondary_ink)
 
-    axes.set_yticks(range(len(pairs)), [f"{_label(w)}\n{b}" for w, b in pairs],
-                    fontsize=10, color=theme.secondary_ink)
+    # With one workload in the frame, naming it on every row says nothing; it goes above instead, and
+    # the rows are left to say which backend they are
+    alone = len({workload for workload, _ in pairs}) == 1
+    labels = [backend if alone else f"{_label(workload)}\n{backend}" for workload, backend in pairs]
+    axes.set_yticks(range(len(pairs)), labels, fontsize=10, color=theme.secondary_ink)
     axes.invert_yaxis()
     axes.set_xlabel("seconds of work, summed across workers", fontsize=9, color=theme.muted_ink, labelpad=8)
     axes.set_xlim(0, longest * 1.2)
     _style(axes, theme)
 
+    subtitle = ("branching against the work around it — summed across workers, so a run with several "
+                "exceeds its wall clock")
+    if alone:
+        subtitle = f"{_label(pairs[0][0])} — {subtitle}"
     axes.set_title("Where a run spends its time", loc="left", pad=34, fontsize=13, color=theme.primary_ink)
-    axes.text(0, 1.055, "branching against the work around it — summed across workers, so a run with several "
-              "exceeds its wall clock", transform=axes.transAxes, fontsize=9, color=theme.muted_ink)
+    axes.text(0, 1.055, subtitle, transform=axes.transAxes, fontsize=9, color=theme.muted_ink)
     figure.legend(frameon=False, fontsize=9, labelcolor=theme.secondary_ink, loc="outside lower center",
                   ncols=len(present))
 
