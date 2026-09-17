@@ -47,5 +47,13 @@ def benchmark(
         verify_clone=verify_clone,
         namespace=namespace,
     )
+    if backend not in BACKENDS:
+        # The dbt backends exist only for part 2: they differ in how a step's tables get built, and
+        # branch on their sibling's primitives unchanged, so timing them here would measure it twice
+        raise typer.BadParameter(
+            f"part 1 times branching itself, which {backend} does exactly as "
+            f"{str(backend).removesuffix('_dbt')} does; run that instead",
+            param_hint="BACKEND",
+        )
     BACKENDS[backend](config=config, results_path=results_path)
     typer.echo(f"results appended to {results_path}")

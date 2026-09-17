@@ -1,0 +1,21 @@
+name: olapbranchbench
+version: "1.0.0"
+profile: olapbranchbench
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+# target-path and log-path are passed per invocation: eight workers run dbt at once and must not
+# share either
+
+models:
+  olapbranchbench:
+    # A step builds tables, the way the hand-written scripts and the Bauplan models do
+    +materialized: table
+    # Snowflake's adapter creates transient tables by default, and a transient table has no Time
+    # Travel — which the fixing workload branches from. Ignored by the Databricks adapter.
+    +transient: false
+
+# Caching is set explicitly on every run rather than left to the platform, the same way the other
+# backends do it, and from the same flag: the backend passes it as a var
+on-run-start:
+  - "{% if target.type == 'snowflake' %}ALTER SESSION SET USE_CACHED_RESULT = {{ 'TRUE' if var('cache', false) else 'FALSE' }}{% else %}SET use_cached_result = {{ 'true' if var('cache', false) else 'false' }}{% endif %}"

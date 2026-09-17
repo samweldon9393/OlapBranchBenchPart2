@@ -177,10 +177,11 @@ def data_science(
     feature at a time. Every branch writes its own tables, and the highest scorer is published at the
     end after reading every survivor's score at once.
     """
-    if backend is Backend.databricks:
+    if backend in (Backend.databricks, Backend.databricks_dbt):
         raise typer.BadParameter(
             "a Databricks SQL warehouse can only run Python one row at a time, which put a single "
-            "feature table at 481s against 7s on Snowflake; this workload is not run there",
+            "feature table at 481s against 7s on Snowflake; this workload is not run there. dbt does "
+            "not change that: its Python models need a cluster, not a SQL warehouse",
             param_hint="BACKEND",
         )
     config = _config(

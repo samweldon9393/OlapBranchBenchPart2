@@ -1,0 +1,27 @@
+# The same credentials the other backends read from .env, which the driver's process already loaded.
+#
+# The database and schema here are only a fallback: every invocation names the branch it is building
+# on through --vars, and the generate_{database,schema}_name macros read those. A profile cannot see
+# vars, which is why the branch cannot be set here.
+olapbranchbench:
+  target: snowflake
+  outputs:
+    snowflake:
+      type: snowflake
+      account: "{{ env_var('SF_ACCOUNT') }}"
+      user: "{{ env_var('SF_USER') }}"
+      role: "{{ env_var('SF_ROLE') }}"
+      warehouse: "{{ env_var('SF_WAREHOUSE') }}"
+      private_key_path: "{{ env_var('SF_PRIVATE_KEY_FILE') }}"
+      database: "{{ env_var('DBT_BRANCH_DATABASE', 'BRANCH_BASE_TPCH_SF1') }}"
+      schema: "{{ env_var('DBT_BRANCH_SCHEMA', 'TPCH_SF1') }}"
+      threads: 1
+
+    databricks:
+      type: databricks
+      host: "{{ env_var('DATABRICKS_SERVER_HOSTNAME') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      catalog: "{{ env_var('DBT_BRANCH_DATABASE', 'bench') }}"
+      schema: "{{ env_var('DBT_BRANCH_SCHEMA', 'tpch') }}"
+      threads: 1

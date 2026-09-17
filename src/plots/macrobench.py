@@ -19,8 +19,9 @@ import polars as pl
 # its colour whether or not a given run happens to contain it.
 OPERATIONS = ("create_branch", "run", "evaluate", "merge_branch", "delete_branch", "aggregate")
 
-# The backends, in the order their bars sit within a workload's group
-BACKENDS = ("bauplan", "snowflake", "databricks")
+# The backends, in the order their bars sit within a workload's group. A dbt backend sits next to
+# the one it borrows its branching from, since the pair is what makes the comparison.
+BACKENDS = ("bauplan", "snowflake", "snowflake_dbt", "databricks", "databricks_dbt")
 
 OPERATION_LABELS = {
     "create_branch": "create branch",
