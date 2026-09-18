@@ -99,6 +99,9 @@ def _built(results_path: Path, completed: subprocess.CompletedProcess) -> bool:
     An invocation that never reached execution — a profile it could not read, a warehouse it could
     not reach — writes no results at all. That is a broken run rather than a wrong attempt, so it
     raises here instead of being reported as a step the checks should prune.
+
+    A model that errored returns False, the same as a statement failing does on the SQL backends;
+    what dbt said about it is in this worker's `dbt.log` under the log path `_paths` hands out.
     """
     if not results_path.exists():
         output = (completed.stderr or completed.stdout or "").strip()
@@ -131,6 +134,9 @@ def run(
 
     variables = {
         **target.branch_vars(branch, namespace),
+        # A model that several builds write — the fixing workload's tables — chooses its body by
+        # the build, the way one Bauplan project per build does it by existing separately
+        "build": action.build,
         "variant": action.variant,
         "cache": cache,
         **dict(action.params),

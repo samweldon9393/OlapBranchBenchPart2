@@ -19,6 +19,7 @@ Benchmarks of data branching across three backends (Bauplan, Databricks, Snowfla
   - [Running a workload](#running-a-workload)
   - [Data engineering](#data-engineering)
   - [WAP](#wap)
+  - [Running the builds through dbt](#running-the-builds-through-dbt)
   - [Fixtures](#fixtures)
   - [What is measured](#what-is-measured)
   - [Status](#status)
@@ -214,6 +215,21 @@ A star, eight workers. Batches of orders arrive; each is appended to the publish
 
 Because the root is shared, this is where merge contention shows up. Bauplan resolves merges per key, so when several workers publish into the same root only the first wins; the losers' branches are anchored to a commit the root has moved past and cannot be merged again no matter how many times they retry. Such a step is redone from scratch off the advanced root instead — re-branch, re-append, re-audit, merge — and the results record how many attempts it took. That redone work is the cost of contention, and it is what this workload mostly measures.
 
+### Running the builds through dbt
+
+Bauplan is handed a project of models and resolves the DAG itself; Snowflake and Databricks are handed an ordered list of statements written by hand. That is the largest structural difference left between the backends, and dbt is the closest analogue the two warehouses have. `snowflake_dbt` and `databricks_dbt` are those platforms with the builds run by dbt and nothing else changed:
+
+```
+uv run main.py macrobench wap snowflake_dbt <DATABASE>
+uv run main.py macrobench fixing databricks_dbt <CATALOG>.<SCHEMA>
+```
+
+Each imports branching, checking and publishing from its plain sibling unchanged, so a pair differs only in how a step's tables get built and the gap between their numbers is what dbt costs. One dbt project under `src/macrobench/workloads/dbt/` covers all four workloads, each model tagged with the build it belongs to, and a step is `dbt run --select tag:<build> --vars '{branch_database: …, branch_schema: …}'` against the branch it is building on.
+
+They are extra backends rather than replacements because dbt puts a process on the client inside the timed region — process start, a full project parse and a fresh connection, around 4-5s per build on this machine — and that constant says as much about the laptop running the benchmark as about the warehouse. Measured per build on Snowflake: data engineering 1.9s → 5.9s, WAP 3.1s → 7.9s, fixing 6.8s → 22.9s, the last inflated further because dbt's incremental models stage a temporary relation and compare its schema where the hand-written script issues one `INSERT`.
+
+dbt does not change what a SQL warehouse can do: Python models on Databricks need a cluster, so the data science workload is refused there either way. On Snowflake it becomes a real Python model, run as Snowpark in the warehouse.
+
 ### Fixtures
 
 Whatever a workload starts from is built inside the warehouse during setup, not shipped as parquet and uploaded:
@@ -234,7 +250,7 @@ Each timed operation appends one row: `create_branch`, `run`, `evaluate`, `delet
 
 Everything around the loop is deliberately outside it — opening clients, cutting the root branch, building the fixture, and the teardown that deletes the run's branches afterwards. Branch names are built outside the measured region too, the same way part 1 does it.
 
-Rows land in `results/macrobench.parquet` by default, carrying `backend`, `workload`, `exp_id`, `step`, `operation`, `target`, `branch_name`, `duration_s`, `started_at`, `ended_at`, `parent`, `depth`, `accepted`, `correct`, `params`, `failed_checks`, `attempts`, `committed`, `steps`, and the run's full `config` as a struct. Merge rows also carry `merge_attempt`, the try they belonged to. As in part 1, results are appended with `how="diagonal_relaxed"`, so adding a field does not break older files.
+Rows land in `results/macrobench.parquet` by default, carrying `backend`, `workload`, `exp_id`, `step`, `operation`, `target`, `branch_name`, `duration_s`, `started_at`, `ended_at`, `parent`, `depth`, `accepted`, `variant`, `params`, `failed_checks`, `attempts`, `committed`, `steps`, and the run's full `config` as a struct. Merge rows also carry `merge_attempt`, the try they belonged to. As in part 1, results are appended with `how="diagonal_relaxed"`, so adding a field does not break older files.
 
 ### Status
 

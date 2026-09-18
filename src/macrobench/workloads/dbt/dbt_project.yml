@@ -14,8 +14,16 @@ models:
     # Snowflake's adapter creates transient tables by default, and a transient table has no Time
     # Travel — which the fixing workload branches from. Ignored by the Databricks adapter.
     +transient: false
+    # Caching is set explicitly rather than left to the platform, the same way the other backends do
+    # it, and from the same flag: the backend passes it as a var. It has to be a model hook rather
+    # than on-run-start, because dbt runs run-level hooks on its own connection and gives each model
+    # thread another — checked against Snowflake's query history, where not one model statement had
+    # run in the session the run-level hook had configured.
+    +pre-hook:
+      - "{% if target.type == 'snowflake' %}ALTER SESSION SET USE_CACHED_RESULT = {{ 'TRUE' if var('cache', false) else 'FALSE' }}{% else %}SET use_cached_result = {{ 'true' if var('cache', false) else 'false' }}{% endif %}"
 
-# Caching is set explicitly on every run rather than left to the platform, the same way the other
-# backends do it, and from the same flag: the backend passes it as a var
-on-run-start:
-  - "{% if target.type == 'snowflake' %}ALTER SESSION SET USE_CACHED_RESULT = {{ 'TRUE' if var('cache', false) else 'FALSE' }}{% else %}SET use_cached_result = {{ 'true' if var('cache', false) else 'false' }}{% endif %}"
+# order_facts is scaffolding the data engineering fixture derives its five tables from, not one of
+# them, so the fixture drops it and the branch is left holding what the workload says it does. A
+# hook that renders to nothing is not run, so every other build ignores this.
+on-run-end:
+  - "{% if var('build', '') == 'de_fixture' %}DROP TABLE IF EXISTS {{ ref('order_facts') }}{% endif %}"

@@ -1,0 +1,10 @@
+version: 2
+
+models:
+  # A Python model has no Jinja, so the run's features reach it as a config the YAML fills in from
+  # the vars. The default keeps every other build's parse from needing a var it never passes.
+  - name: ds_features
+    config:
+      tags: ["ds_features"]
+      meta:
+        features: "{{ var('features', 'quantity') }}"
