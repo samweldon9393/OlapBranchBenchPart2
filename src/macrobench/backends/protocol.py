@@ -23,7 +23,9 @@ from typing import Protocol
 from src.common.backend import Backend
 from src.macrobench.backends import bauplan as bauplan_backend
 from src.macrobench.backends import databricks as databricks_backend
+from src.macrobench.backends import databricks_dbt as databricks_dbt_backend
 from src.macrobench.backends import snowflake as snowflake_backend
+from src.macrobench.backends import snowflake_dbt as snowflake_dbt_backend
 from src.macrobench.experiment import Action
 
 
@@ -104,4 +106,6 @@ BACKENDS: dict[Backend, MacroBackend] = {
     Backend.bauplan: bauplan_backend,
     Backend.snowflake: snowflake_backend,
     Backend.databricks: databricks_backend,
+    Backend.snowflake_dbt: snowflake_dbt_backend,
+    Backend.databricks_dbt: databricks_dbt_backend,
 }
