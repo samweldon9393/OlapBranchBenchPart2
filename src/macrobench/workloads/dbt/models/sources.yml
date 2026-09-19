@@ -1,0 +1,18 @@
+version: 2
+
+# The TPC-H tables every workload starts from. They live on the branch the step is building on, the
+# same place its own tables go, because a branch here is a clone of the whole database (Snowflake) or
+# a schema of cloned tables (Databricks) — inputs and outputs together.
+sources:
+  - name: branch
+    database: "{{ var('branch_database', target.database) }}"
+    schema: "{{ var('branch_schema', target.schema) }}"
+    tables:
+      - name: customer
+      - name: lineitem
+      - name: nation
+      - name: orders
+      - name: part
+      - name: partsupp
+      - name: region
+      - name: supplier

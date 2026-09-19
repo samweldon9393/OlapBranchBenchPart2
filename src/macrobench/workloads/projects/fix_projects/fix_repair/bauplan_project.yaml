@@ -31,3 +31,10 @@ parameters:
     default: duplicate
   first_year:
     default: "1992"
+  judged_from:
+    default: "1992-01-01"
+  judged_batch:
+    default: "0"
+  # The ids of the checks that apply to this step, comma separated; the expectations read it
+  checks:
+    default: ""

@@ -38,6 +38,25 @@ class Action:
 
 
 @dataclass(frozen=True)
+class Outcome:
+    """What a build came to: whether it built, and which of the checks it was given failed.
+
+    Checks run inside the build, the way a pipeline audits itself — as Bauplan expectations, as dbt
+    tests, or as the check queries the SQL backends run once their scripts have — so one call both
+    builds a step and judges it. `failed` means something only when `built` is true: a build that
+    did not build could not be judged at all.
+    """
+
+    built: bool
+    failed: frozenset[str] = frozenset()
+
+    @property
+    def accepted(self) -> bool:
+        """Whether the step is fit to keep."""
+        return self.built and not self.failed
+
+
+@dataclass(frozen=True)
 class Fixture:
     """What setup builds on the root branch, in order, before any timed step runs.
 
@@ -67,9 +86,13 @@ class Workload:
     they run for every target the branch carries, so a step has to leave its ancestors' work intact
     as well as land its own. `invariants` judge the branch whatever it built, and run once per step;
     a workload whose every step is judged the same way says so here instead of mapping every target
-    to the same checks. Both are SQL returning a single row with one boolean `ok` column, and may
-    contain `{name}` placeholders the driver fills from the action's params. A step is accepted when
-    everything run on it passes, which is the same rule for every workload.
+    to the same checks. A step is accepted when everything run on it passes, which is the same rule
+    for every workload.
+
+    Both are SQL returning a single row with one boolean `ok` column, and may contain `{name}`
+    placeholders the driver fills from the action's params. The SQL backends run that SQL; Bauplan
+    and dbt carry the same checks inside their projects — as expectations and as tests — and are
+    handed only the ids of the ones that apply, so the id is what ties the three together.
     """
 
     name: str
@@ -92,9 +115,8 @@ class MacrobenchConfig:
 
     The seed makes a single-worker run reproducible: it drives what the agent attempts at each step
     and how well that attempt turns out. `p_correct` is the chance any one attempt is a good one —
-    a coin flip where a workload builds a correct or a broken version, the same probability
-    expressed as a score to beat where a workload scores its attempts, and nothing at all to a
-    workload whose steps are all deliberate.
+    a coin flip where a workload builds a correct or a broken version, and nothing at all to a
+    workload whose outcomes are down to the data.
 
     Caching is off by default and always passed explicitly, never left to the platform or the
     profile to resolve. The workload repeats identical work constantly — the same correct rewrite

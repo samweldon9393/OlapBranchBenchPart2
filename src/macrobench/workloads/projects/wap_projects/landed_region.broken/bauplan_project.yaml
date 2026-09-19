@@ -1,3 +1,8 @@
 project:
   id: c6e328ab-df6f-4a4c-aa35-14d456798f68
   name: macrobench_landed_region_broken
+
+parameters:
+  # The ids of the checks that apply to this step, comma separated; the expectations read it
+  checks:
+    default: ""

@@ -1,4 +1,10 @@
-"""The data engineering workload: consolidate three drifted feeds and reconcile a mart on top.
+"""The data engineering workload: debug a pipeline that consolidates three drifted feeds into a mart.
+
+The pipeline is one DAG of five models, and every step runs all of it, the way a pipeline is run: the
+agent rewrites one model on a branch, reruns the whole pipeline, and keeps the branch if the models
+it has fixed so far all match gold. The pipeline starts out with every model broken, so the agent
+fixes them one at a time, walking up the DAG — a model is only worth fixing once everything it reads
+is right.
 
 Everything specific to this workload lives here — what the fixture leaves on the root branch, the
 DAG the agent walks, and how each model is judged against gold. The loop and the backend adapters
@@ -26,6 +32,10 @@ FIXTURE = Fixture(
 # Three staging models over the feeds, a union on top of them, and a mart on top of that
 TARGETS = ("stg_americas", "stg_europe", "stg_asia", "orders_unified", "revenue_by_nation_quarter")
 
+# What every step runs: the whole pipeline, as one Bauplan project, one dbt tag, or the SQL scripts
+# de_pipeline.pipeline lists
+PIPELINE = "de_pipeline"
+
 # The staging models read fixture tables, which the root branch always carries, so only the upper
 # layers have prerequisites
 DEPENDENCIES: dict[str, frozenset[str]] = {
@@ -37,10 +47,12 @@ DEPENDENCIES: dict[str, frozenset[str]] = {
 }
 
 # Money columns are cast to a common decimal type and nulls are coalesced to a sentinel before the
-# comparison. Both matter: sums widen decimal precision, and DataFusion's EXCEPT treats null as
-# distinct from null, so gold's null tax on the americas rows would otherwise report every one of
-# them as a mismatch. The broken model variants all get values wrong rather than types, so
-# normalizing types here does not hide them.
+# comparison. Both matter: sums widen decimal precision, and whether one null equals another in a
+# set difference is something engines disagree on, so gold's null tax on the americas rows could
+# otherwise report every one of them as a mismatch. The broken model variants all get values wrong
+# rather than types, so normalizing types here does not hide them. The SQL backends run this SQL;
+# the dbt tests (macros/matches_gold.sql) and the Bauplan pipeline's expectations make the same
+# comparison their own way.
 _STAGED_COLUMNS = """
     order_key, cust_key, order_date,
     CAST(net_price AS DECIMAL(18,2)) AS net_price,
@@ -104,13 +116,26 @@ def choose_action(
     parent. Whether it gets the rewrite right is a coin flip weighted by p_correct, so a lower
     value means more dead ends and a longer walk to the same finished state. The step counter is
     unused here; this workload's choice depends only on what the parent already has.
+
+    The step runs the whole pipeline, so the action says how every model is written: the ones the
+    parent has fixed stay correct, the one being rewritten takes the drawn variant, and the rest are
+    still broken. The branch's checks are the fixed models' plus the rewritten one's, so a model not
+    yet touched is never what a step is judged on.
     """
     attemptable = [
         target for target in TARGETS if target not in parent_state and DEPENDENCIES[target] <= parent_state
     ]
     if not attemptable:
         return None
-    return Action(target=rng.choice(attemptable), variant="correct" if rng.random() < p_correct else "broken")
+    target = rng.choice(attemptable)
+    variant = "correct" if rng.random() < p_correct else "broken"
+    variants = {model: "correct" if model in parent_state else "broken" for model in TARGETS} | {target: variant}
+    return Action(
+        target=target,
+        builder=PIPELINE,
+        variant=variant,
+        params=tuple((f"variant_{model}", written) for model, written in variants.items()),
+    )
 
 
 WORKLOAD = Workload(

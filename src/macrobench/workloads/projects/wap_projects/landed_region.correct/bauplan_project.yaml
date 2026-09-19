@@ -1,3 +1,8 @@
 project:
   id: 00d6290f-8764-4f78-9164-edbaa844ec93
   name: macrobench_landed_region_correct
+
+parameters:
+  # The ids of the checks that apply to this step, comma separated; the expectations read it
+  checks:
+    default: ""

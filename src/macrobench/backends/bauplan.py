@@ -8,15 +8,16 @@ variant too.
 """
 
 import os
+import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import bauplan
 from dotenv import load_dotenv
 
 from src.macrobench.backends.refs import pack_ref
-from src.macrobench.experiment import Action
+from src.macrobench.experiment import Action, Outcome
 
 # Credentials come from .env file
 load_dotenv()
@@ -41,13 +42,17 @@ def _project(build: str, variant: str = "") -> Path:
 
     A build whose variants read different tables has a project each, `<build>.<variant>`, the way
     the SQL side has a script each — reading a table only to throw it away would cost this backend
-    work the others never do. Where one project can build either variant it takes the variant as a
-    parameter instead, and a single directory serves both.
+    work the others never do. A pipeline is one project whatever its models' variants, which it
+    takes as parameters like everything else the action passes.
     """
     for name in (f"{build}.{variant}", build):
         if name in PROJECTS:
             return PROJECTS[name]
     raise RuntimeError(f"no bauplan project named {build} under {PROJECTS_ROOT}")
+
+
+# How a strict run reports an expectation that asserted: its message, which is the check's id
+_FAILED_EXPECTATION = re.compile(r"expectation returned with exception: (\S+) \(")
 
 
 def _cache_mode(cache: bool) -> str:
@@ -130,20 +135,34 @@ def tables(client: bauplan.Client, branch: str, namespace: str) -> frozenset[str
     return frozenset(table.name.lower() for table in client.get_tables(branch, filter_by_namespace=namespace))
 
 
-def run(client: bauplan.Client, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
-    """Build the action on the branch by running its project.
+def run(
+    client: bauplan.Client,
+    branch: str,
+    namespace: str,
+    action: Action,
+    checks: Mapping[str, str],
+    cache: bool = False,
+) -> Outcome:
+    """Build the action on the branch by running its project, whose expectations audit it.
+
+    A step's checks are expectations in the project it runs, named after the check they are. The
+    project is told which apply as a `checks` parameter, and those assert with the check's id as
+    their message; the rest pass without judging anything.
+
+    The run is strict, because that is the only way an expectation stops anything: without it a
+    failed one is logged and the run still reports success. Strict, the run fails atomically — nothing
+    it built lands — and the failure names the first expectation that failed. Only that one, since
+    the run stops there, so where the other backends report every check that failed this reports one.
 
     A run that fails is not an error the benchmark should stop for: writing something that does not
     build is one of the ways an attempt can be wrong, and such a step gets pruned like any other
     dead end. Only Bauplan's own failures are swallowed, so a broken client or bad credentials
     still surface instead of looking like a very unlucky agent.
     """
-    # A project named for the variant already is that variant; only one that serves both needs
-    # telling, so no project has to declare a parameter it never reads
     project = _project(action.build, action.variant)
     parameters = dict(action.params)
-    if action.variant and project.name == action.build:
-        parameters["variant"] = action.variant
+    if checks:
+        parameters["checks"] = ",".join(sorted(checks))
     try:
         state = client.run(
             project_dir=str(project),
@@ -151,10 +170,20 @@ def run(client: bauplan.Client, branch: str, namespace: str, action: Action, cac
             namespace=namespace,
             parameters=parameters or None,
             cache=_cache_mode(cache),
+            strict="on",
         )
     except bauplan.exceptions.BauplanError:
-        return False
-    return str(state.job_status).lower() == "success"
+        return Outcome(built=False)
+    if str(state.job_status).lower() == "success":
+        return Outcome(built=True)
+
+    error = str(state.error or "")
+    if (failed := _FAILED_EXPECTATION.search(error)) and failed.group(1) in checks:
+        return Outcome(built=True, failed=frozenset({failed.group(1)}))
+    if "expectation" in error:
+        # An expectation failed without saying which: every check that applied is in doubt
+        return Outcome(built=True, failed=frozenset(checks))
+    return Outcome(built=False)
 
 
 def query(client: bauplan.Client, branch: str, namespace: str, statement: str, cache: bool = False) -> list[dict]:

@@ -8,9 +8,11 @@ Every attempt builds its own feature table and its own metrics table on its own 
 is shared between siblings: this is the workload that makes storage grow, and that has to clean up
 after itself. The winner is decided at the end by reading every surviving branch's metrics at once.
 
-The "model" is simulated. A score is drawn from the run's seeded RNG and written to the branch's
-metrics table as if a model had produced it: the point is the branching and the storage, not the
-statistics, and a score drawn inside a warehouse would make a run impossible to reproduce.
+Each attempt runs the whole pipeline: build the candidate's features, fit a model to them, and score
+it on rows it never saw. The model is real and deterministic — least squares, or a single best
+split — so a candidate's score comes from the data and is the same on every backend and every run,
+and which candidates survive is the data's call rather than a draw. On TPC-H that means the lineages
+that carry ship_delay: the other columns are generated independently of whether a line arrives late.
 """
 
 import random
@@ -20,16 +22,22 @@ from src.macrobench.experiment import Action, Fixture, Workload
 # The candidate features, all derivable from lineitem joined to orders
 FEATURES = ("ship_delay", "quantity", "discount", "priority")
 
-# The two kinds of model the agent compares. Chosen once, off the root, and kept down a lineage.
+# The two kinds of model the agent compares — a single best split, and least squares. Chosen once,
+# off the root, and kept down a lineage.
 MODELS = ("tree", "regression")
 
 # Off the root, a candidate is a model and a first feature: 2 x 4 = 8 branches. Below that, each
 # refinement adds one more feature, so a target there is just the feature it adds.
 ROOTS = tuple(f"{model}:{feature}" for model in MODELS for feature in FEATURES)
 
-# Every attempt builds the same way — a feature table and a metrics row — and only its parameters
-# differ, so all of them run one builder rather than a project or script per target
-BUILDER = "ds_features"
+# Every attempt runs the same pipeline — features, a fitted model, its score — and only its
+# parameters differ, so all of them run one builder rather than a project or script per target
+BUILDER = "ds_pipeline"
+
+# How much of the label's variance a candidate has to explain, on held-out rows, to be refined further.
+# Calibrated on SF1: every feature set with ship_delay scores about 0.50 (tree) or 0.55 (regression),
+# and every one without it about zero, so the bar sits well clear of both.
+THRESHOLD = 0.1
 
 
 def _lineage(state: frozenset[str]) -> tuple[str, list[str]]:
@@ -58,9 +66,8 @@ def choose_action(
     does not have yet. `tried` keeps two siblings from ever getting the same candidate, including one
     that was already tried and pruned — scoring the same feature set twice is not refining it.
 
-    The score is drawn here, from the seeded RNG, and passed to the builder to write down: a run is
-    then reproducible from its seed, and whether a candidate survives is decided in the same place
-    as everything else the agent decides. It clears the bar with probability p_correct.
+    Which candidate comes next is drawn from the seeded RNG; whether it survives is the data's to
+    say, so p_correct is unused.
     """
     if not parent_state:
         candidates = [root for root in ROOTS if root not in tried]
@@ -77,21 +84,18 @@ def choose_action(
         target = rng.choice(candidates)
         features = [*features, target]
 
-    score = rng.random()
-    threshold = 1 - p_correct
     return Action(
         target=target,
         builder=BUILDER,
         params=(
             ("features", ",".join(sorted(features))),
             ("model", model),
-            ("score", f"{score:.6f}"),
-            ("threshold", f"{threshold:.6f}"),
+            ("threshold", str(THRESHOLD)),
         ),
     )
 
 
-# A candidate survives when its score clears the bar. The feature set is checked too, so a builder
+# A candidate survives when its score clears the bar. The feature set is checked too, so a pipeline
 # that failed cannot pass on the strength of the metrics row it inherited from its parent.
 SCORE_CHECK = "SELECT score >= {threshold} AND features = '{features}' AS ok FROM ds_metrics"
 

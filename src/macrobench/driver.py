@@ -68,6 +68,10 @@ def _checks(workload: Workload, built: frozenset[str], params: Mapping[str, str]
     A target's checks are qualified with the target, so two targets naming a check the same way stay
     two checks and a failure says which target's check it was. Invariants judge the branch whatever
     it built and are named on their own.
+
+    Which checks apply is decided here, once, for every backend; the backend runs them as part of
+    the build, whether as this SQL or as the expectations and tests its project carries under the
+    same ids.
     """
     checks = {
         f"{target}.{name}": sql
@@ -75,28 +79,6 @@ def _checks(workload: Workload, built: frozenset[str], params: Mapping[str, str]
         for name, sql in workload.checks.get(target, {}).items()
     }
     return {name: sql.format(**params) for name, sql in (checks | dict(workload.invariants)).items()}
-
-
-def _evaluate(
-    ops: MacroBackend, client: object, branch: str, namespace: str, checks: Mapping[str, str], cache: bool
-) -> frozenset[str]:
-    """Run each check on the branch and return the ones that passed.
-
-    The workload supplies the SQL and this only reads the boolean it returns, so what counts as
-    correct never has to be known here. A check that cannot run at all — a target that never
-    materialized, or SQL that will not typecheck against what was built — counts as not passing
-    rather than as a benchmark failure.
-    """
-    passing = set()
-    for name, statement in checks.items():
-        try:
-            rows = ops.query(client, branch, namespace, statement, cache)
-        except Exception as error:  # noqa: BLE001 - the backend's exception types are its own
-            _note("check", f"{name} on {branch}: {str(error).splitlines()[0]}")
-            continue
-        if rows and rows[0].get("ok"):
-            passing.add(name)
-    return frozenset(passing)
 
 
 def _step_branch(root: str, step: int, attempt: int) -> str:
@@ -116,7 +98,7 @@ class Attempt:
     rows: list[dict] = field(default_factory=list)
     child: Node | None = None
     accepted: bool = False
-    passing: frozenset[str] = frozenset()
+    failed: frozenset[str] = frozenset()
     attempts: int = 0
 
 
@@ -131,7 +113,10 @@ def _attempt(
     source: str,
     checks: Mapping[str, str],
 ) -> Attempt:
-    """Branch, build, check, and then keep, publish or discard — retrying only a lost merge race.
+    """Branch, build and audit, and then keep, publish or discard — retrying only a lost merge race.
+
+    The audit is part of the build: the backend runs the step's checks inside the same `run`, so
+    the timed `run` covers both, the way a pipeline's run covers its expectations.
 
     A retry is a fresh branch off the parent as it now stands: the branch that lost is anchored to a
     commit the parent has moved past, so its work has to be redone rather than merged again.
@@ -154,25 +139,21 @@ def _attempt(
         result.rows.append(row)
         tree.opened(branch)
 
-        row, built = timed(
-            "run", step, action.target, branch, partial(ops.run, client, branch, config.namespace, action, config.cache)
-        )
-        result.rows.append(row)
-        # The checks decide whether a step is kept, so a build that did not run is left to fail them
-        # like any other bad attempt — but it is worth saying so, since "the check could not run" and
-        # "the check found something wrong" look identical in the results otherwise
-        if not built:
-            _note("build", f"{action.build} did not build on {branch.rsplit('_', 1)[-1]}")
-
-        row, result.passing = timed(
-            "evaluate",
+        row, outcome = timed(
+            "run",
             step,
             action.target,
             branch,
-            partial(_evaluate, ops, client, branch, config.namespace, checks, config.cache),
+            partial(ops.run, client, branch, config.namespace, action, checks, config.cache),
         )
         result.rows.append(row)
-        result.accepted = result.passing == frozenset(checks)
+        result.accepted = outcome.accepted
+        # A build that did not build could not be judged, so none of its checks count as passed — but
+        # it is worth saying so, since "nothing to check" and "the check found something wrong" look
+        # identical in the results otherwise
+        result.failed = outcome.failed if outcome.built else frozenset(checks)
+        if not outcome.built:
+            _note("build", f"{action.build} did not build on {branch.rsplit('_', 1)[-1]}")
 
         if result.accepted and not config.merge_on_commit:
             # The branch stays, and later steps can build on top of it
@@ -199,8 +180,7 @@ def _attempt(
 
         took = f"{time.perf_counter() - started:.1f}s"
         if not result.accepted:
-            failed = ", ".join(sorted(frozenset(checks) - result.passing))
-            _step_note(step, config, action, "rejected", f"{took}  failed: {failed}")
+            _step_note(step, config, action, "rejected", f"{took}  failed: {', '.join(sorted(result.failed))}")
             return result
         if conflict is None:
             _step_note(step, config, action, "published", took)
@@ -243,7 +223,7 @@ def _steps(
                 accepted=attempt.accepted,
                 variant=action.variant,
                 params=json.dumps(params),
-                failed_checks=sorted(frozenset(checks) - attempt.passing),
+                failed_checks=sorted(attempt.failed),
                 # How many tries the step took, on every row so a step's cost can be read off any of them
                 attempts=attempt.attempts,
             )
@@ -281,7 +261,8 @@ def _setup(
     """
     snapshots: list[str] = []
     for build in fixture.builds:
-        if not ops.run(client, root_branch, config.namespace, build, config.cache):
+        # A fixture is built, not judged: it is what the checks are later made against
+        if not ops.run(client, root_branch, config.namespace, build, {}, config.cache).built:
             raise RuntimeError(f"fixture build {build.build} failed on {root_branch}")
         snapshots.append(ops.snapshot(client, root_branch))
 

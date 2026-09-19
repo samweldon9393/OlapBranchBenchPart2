@@ -1,0 +1,8 @@
+# The data engineering pipeline, in the order its scripts run. Each node runs <node>.<variant>.sql,
+# its variant named by the step's variant_<node> param. Bauplan and dbt work this order out from the
+# models themselves; a list of hand-written statements has to be told it.
+stg_americas
+stg_europe
+stg_asia
+orders_unified
+revenue_by_nation_quarter
