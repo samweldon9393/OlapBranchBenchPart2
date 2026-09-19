@@ -32,7 +32,7 @@ from src.branch.databricks import list_tables, split_namespace
 from src.branch.sql import Connection, Cursor, ident
 from src.macrobench.backends import sql
 from src.macrobench.backends.refs import pack_ref, unpack_ref
-from src.macrobench.experiment import Action
+from src.macrobench.experiment import Action, Outcome
 
 # A branch is itself a schema here, so the namespace is fixed by the branch rather than named
 # separately. This is the schema of the usual base, kept only so the protocol has an answer.
@@ -162,7 +162,13 @@ def create_branch(client: Connection, branch: str, from_ref: str) -> str:
     catalog, schema = _schema(branch)
     cursor = client.cursor()
     cursor.execute(f"CREATE SCHEMA {catalog}.{schema}")
-    _clone_tables(cursor, source, branch, deep=False, versions=versions)
+    try:
+        _clone_tables(cursor, source, branch, deep=False, versions=versions)
+    except Exception:
+        # The driver only learns a branch exists once this returns, so a schema left behind by a
+        # clone that failed — a nested shallow clone, say — is one teardown would never find
+        cursor.execute(f"DROP SCHEMA IF EXISTS {catalog}.{schema} CASCADE")
+        raise
     return branch
 
 
@@ -226,9 +232,11 @@ def tables(client: Connection, branch: str, namespace: str) -> frozenset[str]:
     return sql.tables(client, DIALECT, branch, namespace)
 
 
-def run(client: Connection, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
-    """Build the action on the branch by running its script."""
-    return sql.run(client, DIALECT, branch, namespace, action, cache)
+def run(
+    client: Connection, branch: str, namespace: str, action: Action, checks: Mapping[str, str], cache: bool = False
+) -> Outcome:
+    """Build the action on the branch by running its scripts, then run its checks."""
+    return sql.run(client, DIALECT, branch, namespace, action, checks, cache)
 
 
 def query(client: Connection, branch: str, namespace: str, statement: str, cache: bool = False) -> list[dict]:

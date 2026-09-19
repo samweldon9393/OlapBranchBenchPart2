@@ -1,13 +1,15 @@
 """Databricks, with the builds run by dbt instead of by statements of our own.
 
 Everything except building a step is the plain Databricks backend's, imported rather than rewritten:
-branching is the same per-table shallow clone, snapshots the same Delta versions, checks the same
-queries. What differs is `run`, so the gap between this backend's numbers and `databricks`' is what
-dbt costs.
+branching is the same per-table shallow clone, snapshots the same Delta versions. What differs is
+`run`, which builds with dbt and audits with the project's tests, so the gap between this backend's
+numbers and `databricks`' is what dbt costs.
 
 dbt does not change what a SQL warehouse can do: Python models here would need a cluster, so the
 data science workload is refused on this backend too.
 """
+
+from collections.abc import Mapping
 
 from src.branch.databricks import split_namespace
 from src.branch.sql import Connection
@@ -26,7 +28,7 @@ from src.macrobench.backends.databricks import (
     snapshot,
     tables,
 )
-from src.macrobench.experiment import Action
+from src.macrobench.experiment import Action, Outcome
 
 # The operations this backend borrows unchanged, and the one it defines
 __all__ = [
@@ -55,10 +57,12 @@ def _branch_vars(branch: str, namespace: str) -> dict[str, str]:
 TARGET = dbt.DbtTarget(name="databricks", branch_vars=_branch_vars)
 
 
-def run(client: Connection, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
+def run(
+    client: Connection, branch: str, namespace: str, action: Action, checks: Mapping[str, str], cache: bool = False
+) -> Outcome:
     """Build the action on the branch by running its models with dbt.
 
     The client is untouched: dbt opens its own warehouse session from the same credentials, which is
     part of what this backend is measuring.
     """
-    return dbt.run(TARGET, branch, namespace, action, cache)
+    return dbt.run(TARGET, branch, namespace, action, checks, cache)

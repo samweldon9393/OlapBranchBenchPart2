@@ -16,7 +16,7 @@ from io import StringIO
 from pathlib import Path
 
 from src.branch.sql import Connection, Cursor
-from src.macrobench.experiment import Action
+from src.macrobench.experiment import Action, Outcome
 
 # The SQL a build runs, named after it and grouped under the workload it belongs to. A build with one
 # implementation is `<name>.sql`; one with several is `<name>.<variant>.sql`. Script names are unique
@@ -24,6 +24,12 @@ from src.macrobench.experiment import Action
 # told which workload is running.
 SQL_ROOT = Path(__file__).parents[1] / "workloads" / "sql"
 SCRIPTS = {script.name: script for script in SQL_ROOT.glob("*/*.sql")}
+
+# A build that is a whole pipeline rather than one script: `<build>.pipeline` lists its nodes in the
+# order they run, one per line, and each node runs its own script in the variant the action's
+# `variant_<node>` param names. Bauplan and dbt resolve a project's DAG themselves; statements written
+# by hand have to be told what order to go in, and this is where they are.
+PIPELINES = {pipeline.stem: pipeline for pipeline in SQL_ROOT.glob("*/*.pipeline")}
 
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 
@@ -51,6 +57,16 @@ def script(build: str, variant: str = "") -> Path:
         return SCRIPTS[filename]
     except KeyError:
         raise RuntimeError(f"no sql script {filename} under {SQL_ROOT}") from None
+
+
+def scripts(action: Action) -> list[Path]:
+    """Every script a build runs, in order: a pipeline's nodes, or the build's own script."""
+    pipeline = PIPELINES.get(action.build)
+    if pipeline is None:
+        return [script(action.build, action.variant)]
+    params = dict(action.params)
+    nodes = [line.strip() for line in pipeline.read_text().splitlines()]
+    return [script(node, params.get(f"variant_{node}", "")) for node in nodes if node and not node.startswith("#")]
 
 
 def statements(path: Path, params: Mapping[str, str]) -> list[str]:
@@ -85,16 +101,36 @@ def _rows(cursor: Cursor) -> list[dict]:
 
 
 def run(
-    client: Connection, dialect: Dialect, branch: str, namespace: str, action: Action, cache: bool = False
-) -> bool:
-    """Build the action on the branch by running its script."""
+    client: Connection,
+    dialect: Dialect,
+    branch: str,
+    namespace: str,
+    action: Action,
+    checks: Mapping[str, str],
+    cache: bool = False,
+) -> Outcome:
+    """Build the action on the branch by running its scripts, then audit it with the checks' SQL.
+
+    A check that cannot run at all — a table that never materialized, SQL that will not typecheck
+    against what was built — has not passed, so it counts as failed rather than as a broken run.
+    """
     try:
         cursor = _cursor(client, dialect, branch, namespace, cache)
-        for statement in statements(script(action.build, action.variant), dict(action.params)):
-            cursor.execute(statement)
+        for path in scripts(action):
+            for statement in statements(path, dict(action.params)):
+                cursor.execute(statement)
     except dialect.failure:
-        return False
-    return True
+        return Outcome(built=False)
+
+    failed = set()
+    for name, check in checks.items():
+        try:
+            rows = query(client, dialect, branch, namespace, check, cache)
+        except dialect.failure:
+            rows = []
+        if not (rows and rows[0].get("ok")):
+            failed.add(name)
+    return Outcome(built=True, failed=frozenset(failed))
 
 
 def query(

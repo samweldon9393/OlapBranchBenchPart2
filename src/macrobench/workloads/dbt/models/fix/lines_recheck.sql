@@ -4,5 +4,6 @@
 
 SELECT l_orderkey AS order_key, count(*) AS line_count
 FROM {{ source('branch', 'lineitem') }}
-WHERE l_shipdate < CAST('{{ var('loaded_end') }}' AS DATE)
+WHERE l_shipdate >= CAST('{{ var('judged_from') }}' AS DATE)
+  AND l_shipdate < CAST('{{ var('loaded_end') }}' AS DATE)
 GROUP BY l_orderkey

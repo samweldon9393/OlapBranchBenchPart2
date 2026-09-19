@@ -1,13 +1,15 @@
 """Building a step with dbt, which is what the dbt backends share.
 
 These backends exist to answer a question the SQL ones cannot: what the agent loop costs a team whose
-transformations live in dbt rather than in statements they run themselves. Branching, checking and
-publishing are unchanged — each dbt backend borrows those from its plain sibling — so the only thing
-that differs is how a build happens, and the difference in the numbers is the tool's.
+transformations live in dbt rather than in statements they run themselves. Branching and publishing
+are unchanged — each dbt backend borrows those from its plain sibling — so the only thing that
+differs is how a build happens and is audited, and the difference in the numbers is the tool's.
 
-A build is `dbt run --select tag:<build>`: the models carrying that tag, in dbt's own dependency
-order, into the branch the step is building on. That mirrors Bauplan, which is handed a project and
-resolves the DAG itself, where the plain SQL backends are handed an ordered list of statements.
+A build is `dbt build --select tag:<build>`: the models carrying that tag, in dbt's own dependency
+order, into the branch the step is building on, and then the tests carrying it — the step's checks,
+which the project holds as singular tests named after them. That mirrors Bauplan, which is handed a
+project, resolves the DAG itself and runs its expectations, where the plain SQL backends are handed
+an ordered list of statements and a list of check queries.
 
 dbt runs as a subprocess rather than through dbtRunner, which serializes concurrent invocations
 inside one process: with eight workers claiming steps at once that would measure a queue rather than
@@ -24,7 +26,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.macrobench.experiment import Action
+from src.macrobench.experiment import Action, Outcome
 
 PROJECT = Path(__file__).parents[1] / "workloads" / "dbt"
 PROFILES = PROJECT / "profiles"
@@ -65,7 +67,7 @@ def _invocation(
     """The dbt command for one build."""
     command = [
         str(Path(sys.executable).parent / "dbt"),
-        "run",
+        "build",
         "--project-dir",
         str(PROJECT),
         "--profiles-dir",
@@ -85,6 +87,10 @@ def _invocation(
         "--no-partial-parse",
         "--select",
         f"tag:{action.build}",
+        # A test runs because its build's tag names it, never because it happens to read a model the
+        # build selected: the fixture builds the gold tables every check reads, and must not run them
+        "--indirect-selection",
+        "empty",
         "--vars",
         json.dumps(dict(variables)),
     ]
@@ -93,21 +99,33 @@ def _invocation(
     return command
 
 
-def _built(results_path: Path, completed: subprocess.CompletedProcess) -> bool:
-    """Whether every model dbt was asked for built.
+def _outcome(results_path: Path, completed: subprocess.CompletedProcess, checks: Mapping[str, str]) -> Outcome:
+    """What the build came to: whether every model built, and which of the step's checks failed.
 
     An invocation that never reached execution — a profile it could not read, a warehouse it could
     not reach — writes no results at all. That is a broken run rather than a wrong attempt, so it
     raises here instead of being reported as a step the checks should prune.
 
-    A model that errored returns False, the same as a statement failing does on the SQL backends;
-    what dbt said about it is in this worker's `dbt.log` under the log path `_paths` hands out.
+    A model that errored means the build did not build, the same as a statement failing does on the
+    SQL backends; what dbt said about it is in this worker's `dbt.log` under the log path `_paths`
+    hands out. A test is named after the check it is, with the id's dot spelled as a double
+    underscore, since a file name cannot hold one.
     """
     if not results_path.exists():
         output = (completed.stderr or completed.stdout or "").strip()
         raise RuntimeError(f"dbt did not run (exit {completed.returncode}): {output[-2000:]}")
-    results = json.loads(results_path.read_text())
-    return all(result["status"] == "success" for result in results["results"])
+    results = json.loads(results_path.read_text())["results"]
+    by_test = {check.replace(".", "__"): check for check in checks}
+    built = True
+    failed = set()
+    for result in results:
+        kind, _project, name = result["unique_id"].split(".", 2)
+        if kind == "test":
+            if result["status"] != "pass":
+                failed.add(by_test.get(name, name))
+        elif result["status"] != "success":
+            built = False
+    return Outcome(built=built, failed=frozenset(failed))
 
 
 def _environment() -> dict[str, str]:
@@ -124,9 +142,13 @@ def _environment() -> dict[str, str]:
 
 
 def run(
-    target: DbtTarget, branch: str, namespace: str, action: Action, cache: bool = False
-) -> bool:
-    """Build the action on the branch by running the models its build is tagged with."""
+    target: DbtTarget, branch: str, namespace: str, action: Action, checks: Mapping[str, str], cache: bool = False
+) -> Outcome:
+    """Build the action on the branch with the models its build is tagged with, then run its checks.
+
+    Every test the build carries runs; the ones whose check does not apply to this step find the id
+    missing from the `checks` var and pass without reading anything.
+    """
     target_path, log_path = _paths()
     results_path = target_path / "run_results.json"
     # Last invocation's results would otherwise stand in for an invocation that never started
@@ -139,6 +161,7 @@ def run(
         "build": action.build,
         "variant": action.variant,
         "cache": cache,
+        "checks": ",".join(sorted(checks)),
         **dict(action.params),
     }
     completed = subprocess.run(  # noqa: S603 - the command is built here, not taken from input
@@ -148,4 +171,4 @@ def run(
         check=False,
         env=_environment(),
     )
-    return _built(results_path, completed)
+    return _outcome(results_path, completed, checks)

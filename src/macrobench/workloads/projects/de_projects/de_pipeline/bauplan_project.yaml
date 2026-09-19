@@ -1,0 +1,20 @@
+project:
+  id: af19a050-77a8-4993-8e42-78ddb57014cd
+  name: macrobench_de_pipeline
+
+# Which implementation each model runs. The pipeline starts out buggy — a model the agent has not
+# fixed yet runs its broken version — and each step rewrites one of them.
+parameters:
+  variant_stg_americas:
+    default: broken
+  variant_stg_europe:
+    default: broken
+  variant_stg_asia:
+    default: broken
+  variant_orders_unified:
+    default: broken
+  variant_revenue_by_nation_quarter:
+    default: broken
+  # The ids of the checks that apply to this step, comma separated; the expectations read it
+  checks:
+    default: ""

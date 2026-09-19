@@ -1,7 +1,7 @@
-{{ config(tags=['revenue_by_nation_quarter']) }}
+{{ config(tags=['de_pipeline']) }}
 
 {#- The broken variant buckets by year, collapsing four quarters into a single row -#}
-{% set bucket = 'year' if var('variant', 'correct') == 'broken' else 'quarter' %}
+{% set bucket = 'year' if var('variant_revenue_by_nation_quarter', 'broken') == 'broken' else 'quarter' %}
 
 -- Nation is not carried on the feeds, so the union is joined back to the dimension tables
 SELECT n.n_name AS nation_name,

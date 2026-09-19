@@ -1,10 +1,13 @@
 """Snowflake, with the builds run by dbt instead of by statements of our own.
 
 Everything except building a step is the plain Snowflake backend's, imported rather than rewritten:
-branching is the same zero-copy clone, snapshots the same Time Travel, checks the same queries. What
-differs is `run`, and so the difference between this backend's numbers and `snowflake`'s is what dbt
-costs — the process, the parse, and the connection it opens for itself.
+branching is the same zero-copy clone, snapshots the same Time Travel. What differs is `run`, which
+builds with dbt and audits with the project's tests, and so the difference between this backend's
+numbers and `snowflake`'s is what dbt costs — the process, the parse, and the connection it opens for
+itself.
 """
+
+from collections.abc import Mapping
 
 from src.branch.sql import Connection
 from src.macrobench.backends import dbt
@@ -22,7 +25,7 @@ from src.macrobench.backends.snowflake import (
     snapshot,
     tables,
 )
-from src.macrobench.experiment import Action
+from src.macrobench.experiment import Action, Outcome
 
 # The operations this backend borrows unchanged, and the one it defines
 __all__ = [
@@ -48,10 +51,12 @@ TARGET = dbt.DbtTarget(
 )
 
 
-def run(client: Connection, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
+def run(
+    client: Connection, branch: str, namespace: str, action: Action, checks: Mapping[str, str], cache: bool = False
+) -> Outcome:
     """Build the action on the branch by running its models with dbt.
 
     The client is untouched: dbt opens its own connection from the same credentials, which is part of
     what this backend is measuring.
     """
-    return dbt.run(TARGET, branch, namespace, action, cache)
+    return dbt.run(TARGET, branch, namespace, action, checks, cache)

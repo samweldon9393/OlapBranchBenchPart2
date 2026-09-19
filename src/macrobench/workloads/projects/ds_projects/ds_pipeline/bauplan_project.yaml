@@ -1,0 +1,14 @@
+project:
+  id: c3c75e52-b6ed-45f8-92d1-60d6eb6c182a
+  name: macrobench_ds_pipeline
+
+parameters:
+  features:
+    default: ship_delay
+  model:
+    default: regression
+  threshold:
+    default: "0.1"
+  # The ids of the checks that apply to this step, comma separated; the expectation reads it
+  checks:
+    default: ""

@@ -13,7 +13,7 @@ platform does differently is the DIALECT below.
 
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 # The connector ships no usable types, which is why part 1's Protocols exist; the error class is
 # imported here rather than lazily because it is what tells a failed build from a broken connection
@@ -24,7 +24,7 @@ from src.branch.snowflake import list_tables
 from src.branch.sql import Connection, Cursor, ident
 from src.macrobench.backends import sql
 from src.macrobench.backends.refs import pack_ref, unpack_ref
-from src.macrobench.experiment import Action
+from src.macrobench.experiment import Action, Outcome
 
 # The schema the TPC-H tables live in on this backend, used when a run does not name one.
 # Snowflake folds unquoted identifiers to upper case, so this is spelled the way it is stored.
@@ -180,9 +180,11 @@ def tables(client: Connection, branch: str, namespace: str) -> frozenset[str]:
     return sql.tables(client, DIALECT, branch, namespace)
 
 
-def run(client: Connection, branch: str, namespace: str, action: Action, cache: bool = False) -> bool:
-    """Build the action on the branch by running its script."""
-    return sql.run(client, DIALECT, branch, namespace, action, cache)
+def run(
+    client: Connection, branch: str, namespace: str, action: Action, checks: Mapping[str, str], cache: bool = False
+) -> Outcome:
+    """Build the action on the branch by running its scripts, then run its checks."""
+    return sql.run(client, DIALECT, branch, namespace, action, checks, cache)
 
 
 def query(client: Connection, branch: str, namespace: str, statement: str, cache: bool = False) -> list[dict]:
