@@ -1,3 +1,8 @@
 project:
   id: 1c8a1ae0-83aa-49b7-8717-12de4525702f
   name: macrobench_landed_orders_correct
+
+parameters:
+  # The ids of the checks that apply to this step, comma separated; the expectations read it
+  checks:
+    default: ""

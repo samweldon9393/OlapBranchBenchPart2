@@ -1,10 +1,23 @@
 version: 2
 
+# A Python model has no Jinja, so what the run is building reaches each stage as the model's `meta`,
+# which this YAML fills in from the vars. The defaults keep every other build's parse from needing a
+# var it never passes.
 models:
-  # A Python model has no Jinja, so the run's features reach it as a config the YAML fills in from
-  # the vars. The default keeps every other build's parse from needing a var it never passes.
   - name: ds_features
     config:
-      tags: ["ds_features"]
+      tags: ["ds_pipeline"]
       meta:
-        features: "{{ var('features', 'quantity') }}"
+        features: "{{ var('features', 'ship_delay') }}"
+  - name: ds_model
+    config:
+      tags: ["ds_pipeline"]
+      meta:
+        features: "{{ var('features', 'ship_delay') }}"
+        model: "{{ var('model', 'regression') }}"
+  - name: ds_metrics
+    config:
+      tags: ["ds_pipeline"]
+      meta:
+        features: "{{ var('features', 'ship_delay') }}"
+        model: "{{ var('model', 'regression') }}"

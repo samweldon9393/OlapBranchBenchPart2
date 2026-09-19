@@ -1,3 +1,8 @@
 project:
   id: 2ca864c2-2686-4942-8e17-ea0b0bb79902
   name: macrobench_landed_supplier_correct
+
+parameters:
+  # The ids of the checks that apply to this step, comma separated; the expectations read it
+  checks:
+    default: ""

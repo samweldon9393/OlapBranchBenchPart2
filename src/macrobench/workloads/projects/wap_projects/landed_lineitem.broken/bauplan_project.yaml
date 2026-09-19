@@ -1,3 +1,8 @@
 project:
   id: 69c8958c-6e57-4820-9337-e7e54473ca75
   name: macrobench_landed_lineitem_broken
+
+parameters:
+  # The ids of the checks that apply to this step, comma separated; the expectations read it
+  checks:
+    default: ""

@@ -1,6 +1,6 @@
-{{ config(tags=['stg_europe']) }}
+{{ config(tags=['de_pipeline']) }}
 
-{% if var('variant', 'correct') == 'broken' %}
+{% if var('variant_stg_europe', 'broken') == 'broken' %}
 
 -- Folds tax into revenue, double counting what the tax column already reports separately
 SELECT order_key, cust_key, CAST(order_date AS DATE) AS order_date,

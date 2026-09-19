@@ -110,7 +110,10 @@ def _choose_action(history: tuple[Action, ...]) -> ChooseAction:
                         params=(
                             ("snapshot", str(snapshot)),
                             ("kind", culprit_params["kind"]),
-                            # Everything loaded by that state: the base months, plus a month per commit
+                            # A probe judges everything that state had loaded: the base months, plus a
+                            # month per commit
+                            ("judged_from", _start(0).isoformat()),
+                            ("judged_batch", "0"),
                             ("loaded_end", _start(CULPRIT + snapshot).isoformat()),
                         ),
                     )
@@ -141,7 +144,11 @@ def _choose_action(history: tuple[Action, ...]) -> ChooseAction:
                     ("start", culprit["start"]),
                     ("culprit_end", culprit["end"]),
                     ("end", _start(last_batch + 1).isoformat()),
-                    # The replay ends where the head does, so that is everything loaded
+                    # A repair judges what it replayed, the culprit's batch onward, up to where the
+                    # head's loading ends. What came before is the state the probe it branches from
+                    # already judged, and a run only hands its expectations what it wrote
+                    ("judged_from", culprit["start"]),
+                    ("judged_batch", str(first)),
                     ("loaded_end", _start(last_batch + 1).isoformat()),
                     ("cut", culprit["cut"]),
                     ("kind", culprit["kind"]),
@@ -153,9 +160,19 @@ def _choose_action(history: tuple[Action, ...]) -> ChooseAction:
     return choose_action
 
 
+# Every invariant judges one window of batches, from `judged_batch` on, against the rechecks, which
+# recompute from source over the same months. A probe's window is everything its state loaded. A
+# repair's is what it replayed: a Bauplan run hands an expectation only the rows the run appended,
+# so that is all a repair's expectations can see, and every backend judges the same window so that
+# they judge the same thing. Nothing is lost, since the months before the culprit are the state the
+# repair branched from, which the probe it follows had already judged.
+
 # The mart against revenue recomputed from source over the same months. Every kind overstates it.
 _REVENUE = """
-    WITH mart AS (SELECT nation_key, SUM(revenue) AS revenue FROM revenue_mart GROUP BY nation_key),
+    WITH mart AS (
+             SELECT nation_key, SUM(revenue) AS revenue FROM revenue_mart
+             WHERE batch_id >= {judged_batch} GROUP BY nation_key
+         ),
          gaps AS (
              SELECT abs(coalesce(m.revenue, 0) - coalesce(r.revenue, 0)) AS gap
              FROM mart m FULL OUTER JOIN revenue_recheck r ON m.nation_key = r.nation_key
@@ -166,7 +183,10 @@ _REVENUE = """
 # Lines per order against source over the same months, which catches a batch loaded twice and lines
 # for orders that do not exist, though not a wrong discount
 _LINE_COUNTS = """
-    WITH actual AS (SELECT l_orderkey AS order_key, count(*) AS line_count FROM li_clean GROUP BY l_orderkey),
+    WITH actual AS (
+             SELECT l_orderkey AS order_key, count(*) AS line_count FROM li_clean
+             WHERE batch_id >= {judged_batch} GROUP BY l_orderkey
+         ),
          mismatched AS (
              SELECT 1 AS mismatch
              FROM actual a FULL OUTER JOIN lines_recheck e ON a.order_key = e.order_key
@@ -177,11 +197,12 @@ _LINE_COUNTS = """
 
 # Every line points at an order, a part, and a supplier that exist
 _REF_INTEGRITY = """
-    SELECT (SELECT count(*) FROM li_clean l LEFT JOIN orders o ON l.l_orderkey = o.o_orderkey
+    WITH judged AS (SELECT l_orderkey, l_partkey, l_suppkey FROM li_clean WHERE batch_id >= {judged_batch})
+    SELECT (SELECT count(*) FROM judged l LEFT JOIN orders o ON l.l_orderkey = o.o_orderkey
             WHERE o.o_orderkey IS NULL) = 0
-       AND (SELECT count(*) FROM li_clean l LEFT JOIN part p ON l.l_partkey = p.p_partkey
+       AND (SELECT count(*) FROM judged l LEFT JOIN part p ON l.l_partkey = p.p_partkey
             WHERE p.p_partkey IS NULL) = 0
-       AND (SELECT count(*) FROM li_clean l LEFT JOIN supplier s ON l.l_suppkey = s.s_suppkey
+       AND (SELECT count(*) FROM judged l LEFT JOIN supplier s ON l.l_suppkey = s.s_suppkey
             WHERE s.s_suppkey IS NULL) = 0 AS ok
 """
 

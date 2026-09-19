@@ -17,6 +17,7 @@ Benchmarks of data branching across three backends (Bauplan, Databricks, Snowfla
   - [Results](#results)
 - [Part 2: end-to-end workloads](#part-2-end-to-end-workloads)
   - [Running a workload](#running-a-workload)
+  - [Workloads are pipelines, and pipelines audit themselves](#workloads-are-pipelines-and-pipelines-audit-themselves)
   - [Data engineering](#data-engineering)
   - [WAP](#wap)
   - [Running the builds through dbt](#running-the-builds-through-dbt)
@@ -28,7 +29,7 @@ Benchmarks of data branching across three backends (Bauplan, Databricks, Snowfla
 
 The repository is a small Typer CLI. A backend-agnostic engine runs an operation N times (serial or across worker threads, with optional jitter) and times only the operation itself. Each backend supplies a thin wrapper that knows how to open a client and how to create and delete a branch; everything else (orchestration, timing, output) is shared. A second (optional) command generates the TPC-H dataset with different scale factors, used as the common input.
 
-Part 2 keeps that shape and widens it. A workload is data — a fixture, a DAG of targets, and a SQL check per target — and every backend implements the same operations behind one protocol, so the loop and the workload definitions are each written once.
+Part 2 keeps that shape and widens it. A workload is data — a fixture, a pipeline of models, and the checks that audit it — and every backend implements the same operations behind one protocol, so the loop and the workload definitions are each written once.
 
 ## Setup
 
@@ -172,8 +173,7 @@ build the workload's fixture on it      (untimed)
   ↓
 repeat until the work is done, or the step budget runs out:
     branch off a committed branch
-    attempt one target on it
-    check every target built so far
+    attempt one target on it: run the pipeline, which audits itself as it goes
     if every check passed, keep the branch: merge it back, or leave it for others to build on
     otherwise delete it and try again from the last good state
   ↓
@@ -197,9 +197,15 @@ The first argument is the backend and the second is what the root branch is cut 
 
 `--cache` is off by default and always passed explicitly rather than left for the platform to resolve, since these workloads rebuild identical artifacts constantly and a warm cache would time a lookup instead of the work.
 
+### Workloads are pipelines, and pipelines audit themselves
+
+Each workload is written the way it would be written on Bauplan: one project, a DAG of SQL and Python models, run as a whole, with the checks inside it as expectations. Bauplan runs a project whole — there is no running part of one — so a step is the loop a data team actually runs: branch, change one model, rerun the pipeline, keep the branch if the audits pass. On dbt the same pipeline is a tag, run with `dbt build` so its tests run with it; on the plain SQL backends it is an ordered list of scripts followed by the check queries. The checks decide acceptance on every backend, and each one exists in all three forms under the same id.
+
+A Bauplan expectation only stops a run in strict mode, so every run is strict: a failed audit fails the run, and nothing it built lands.
+
 ### Data engineering
 
-A chain, one worker. Three regional feeds of the same orders disagree with each other the way real multi-source feeds do — one reports price before discount, one after and with an extra tax column, one uses raw column names and repeats about 1% of its rows. The agent standardizes each feed, unions them into one table tagged by source, and builds a revenue mart by nation and quarter on top:
+A chain, one worker. Three regional feeds of the same orders disagree with each other the way real multi-source feeds do — one reports price before discount, one after and with an extra tax column, one uses raw column names and repeats about 1% of its rows. The pipeline standardizes each feed, unions them into one table tagged by source, and builds a revenue mart by nation and quarter on top — and it starts out with every model broken:
 
 ```
 feed_americas ─→ stg_americas ─┐
@@ -207,7 +213,7 @@ feed_europe   ─→ stg_europe   ─┼─→ orders_unified ─→ revenue_by_
 feed_asia     ─→ stg_asia     ─┘
 ```
 
-Each model has a correct and a broken version, and a target passes when it reproduces its gold table exactly. The agent only attempts a target whose inputs already pass, so it walks up the DAG and never builds on a broken parent. Accepted steps stack into a single deep chain, published once at the end.
+Each step rewrites one model — correctly or not — and reruns all five. A model passes when it reproduces its gold table exactly, and a step is kept when every model fixed so far passes. The agent only attempts a model whose inputs already pass, so it walks up the DAG and never builds on a broken parent. Accepted steps stack into a single deep chain, published once at the end.
 
 ### WAP
 
@@ -224,9 +230,9 @@ uv run main.py macrobench wap snowflake_dbt <DATABASE>
 uv run main.py macrobench fixing databricks_dbt <CATALOG>.<SCHEMA>
 ```
 
-Each imports branching, checking and publishing from its plain sibling unchanged, so a pair differs only in how a step's tables get built and the gap between their numbers is what dbt costs. One dbt project under `src/macrobench/workloads/dbt/` covers all four workloads, each model tagged with the build it belongs to, and a step is `dbt run --select tag:<build> --vars '{branch_database: …, branch_schema: …}'` against the branch it is building on.
+Each imports branching and publishing from its plain sibling unchanged, so a pair differs only in how a step's tables get built and audited, and the gap between their numbers is what dbt costs. One dbt project under `src/macrobench/workloads/dbt/` covers all four workloads, each model and test tagged with the build it belongs to, and a step is `dbt build --select tag:<build> --vars '{branch_database: …, branch_schema: …, checks: …}'` against the branch it is building on.
 
-They are extra backends rather than replacements because dbt puts a process on the client inside the timed region — process start, a full project parse and a fresh connection, around 4-5s per build on this machine — and that constant says as much about the laptop running the benchmark as about the warehouse. Measured per build on Snowflake: data engineering 1.9s → 5.9s, WAP 3.1s → 7.9s, fixing 6.8s → 22.9s, the last inflated further because dbt's incremental models stage a temporary relation and compare its schema where the hand-written script issues one `INSERT`.
+They are extra backends rather than replacements because dbt puts a process on the client inside the timed region — process start, a full project parse and a fresh connection, around 4-5s per build on this machine — and that constant says as much about the laptop running the benchmark as about the warehouse. Measured per build on Snowflake, before audits moved into the build and data engineering became a whole-pipeline rerun: data engineering 1.9s → 5.9s, WAP 3.1s → 7.9s, fixing 6.8s → 22.9s, the last inflated further because dbt's incremental models stage a temporary relation and compare its schema where the hand-written script issues one `INSERT`.
 
 dbt does not change what a SQL warehouse can do: Python models on Databricks need a cluster, so the data science workload is refused there either way. On Snowflake it becomes a real Python model, run as Snowpark in the warehouse.
 
@@ -246,7 +252,7 @@ Setup fails loudly if the fixture does not leave every table it owes. For data e
 
 ### What is measured
 
-Each timed operation appends one row: `create_branch`, `run`, `evaluate`, `delete_branch`, `merge_branch` and `aggregate` (reading one table off every surviving branch), plus one `<workload>_workload` row covering the whole timed region so a run's end-to-end cost is queryable without re-adding the parts and the gaps between them.
+Each timed operation appends one row: `create_branch`, `run` (the pipeline and its audits), `delete_branch`, `merge_branch` and `aggregate` (reading one table off every surviving branch), plus one `<workload>_workload` row covering the whole timed region so a run's end-to-end cost is queryable without re-adding the parts and the gaps between them.
 
 Everything around the loop is deliberately outside it — opening clients, cutting the root branch, building the fixture, and the teardown that deletes the run's branches afterwards. Branch names are built outside the measured region too, the same way part 1 does it.
 

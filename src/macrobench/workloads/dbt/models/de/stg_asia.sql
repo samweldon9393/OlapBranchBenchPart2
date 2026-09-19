@@ -1,6 +1,6 @@
-{{ config(tags=['stg_asia']) }}
+{{ config(tags=['de_pipeline']) }}
 
-{% if var('variant', 'correct') == 'broken' %}
+{% if var('variant_stg_asia', 'broken') == 'broken' %}
 
 -- Trusts the feed to hold one row per order, which it does not
 SELECT o_orderkey AS order_key, o_custkey AS cust_key, o_orderdate AS order_date,

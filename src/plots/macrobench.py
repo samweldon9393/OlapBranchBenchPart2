@@ -16,7 +16,8 @@ from pathlib import Path
 import polars as pl
 
 # The order a step runs in, which is also the order segments stack. Fixed, so an operation keeps
-# its colour whether or not a given run happens to contain it.
+# its colour whether or not a given run happens to contain it. A step's checks now run inside `run`,
+# so current runs have no `evaluate`; it stays so that results from before still draw the same way.
 OPERATIONS = ("create_branch", "run", "evaluate", "merge_branch", "delete_branch", "aggregate")
 
 # The backends, in the order their bars sit within a workload's group. A dbt backend sits next to
@@ -25,8 +26,8 @@ BACKENDS = ("bauplan", "snowflake", "snowflake_dbt", "databricks", "databricks_d
 
 OPERATION_LABELS = {
     "create_branch": "create branch",
-    "run": "run (build)",
-    "evaluate": "evaluate (check)",
+    "run": "run (build + audit)",
+    "evaluate": "evaluate (older runs)",
     "merge_branch": "merge branch",
     "delete_branch": "delete branch",
     "aggregate": "aggregate across branches",
